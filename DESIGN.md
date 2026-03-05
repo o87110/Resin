@@ -64,7 +64,7 @@
    * `V1` 路径：`/PROXY_TOKEN/Platform.Account/protocol/host/path?query`；身份段按第一个出现的 `.` 或 `:` 切分。
    * `LEGACY_V0` 路径：`/PROXY_TOKEN/Platform:Account/protocol/host/path?query`；身份段按第一个 `:` 切分。
    * `LEGACY_V0` 模式下禁用 V1 身份段解析策略（例如纯 `Platform` 身份段在 `LEGACY_V0` 直接视为路径解析错误）。
-   * URL 身份段（`Platform.Account` / `Platform:Account`）接口定位为“简单使用 / 手动调试”；正式集成推荐通过请求头 `X-Resin-Account` 提供 Account。
+   * URL 身份段（`Platform.Account` / `Platform:Account`）接口定位为“简单使用 / 手动调试”；正式集成推荐通过请求头 `X-Resin-Account` 提供 Account。`X-Resin-Account` 的优先级高于 URL 身份段的 Account。
 5. Platform 名称在创建/更新时先 trim，再校验：非空、全局唯一、不可命中保留字（`Default`/`api`），且不得包含 `.:|/\@?#%~` 与空格、tab、换行、回车。
 6. 当 Platform 未提供，默认使用 Default 平台。当代理的 Account 未提供，默认使用平台内的随机路由。
 
@@ -76,6 +76,18 @@
 | `Nimbus:resin-123456` | `resin-123456` | `Nimbus` | 空 |
 | `Nimbus.:resin-123456` | `resin-123456` | `Nimbus` | 空 |
 | `MyHub.bEA:234:resin-123456` | `resin-123456` | `MyHub` | `bEA:234` |
+
+反向代理 URL 身份段例子（V1）：
+| 反向代理 URL | ProxyToken | Platform | Account |
+| --- | --- | --- | --- |
+| `/resin-123456/Nimbus.Tom/...` | `resin-123456` | `Nimbus` | `Tom` |
+| `/resin-123456/.Tom/...` | `resin-123456` | 空 | `Tom` |
+| `/resin-123456/Nimbus/...` | `resin-123456` | `Nimbus` | 空 |
+| `/resin-123456/Nimbus./...` | `resin-123456` | `Nimbus` | 空 |
+| `/resin-123456/MyHub.bEA:234/...` | `resin-123456` | `MyHub` | `bEA:234` |
+| `/resin-123456/MyHub.ops%2Fprod%3Feu%231/...` | `resin-123456` | `MyHub` | `ops/prod?eu#1` |
+
+其中最后一行的原始身份段是 `MyHub.ops/prod?eu#1`，因包含会影响路径分段的特殊字符（`/`、`?`、`#`），需要先按 Path Segment 规则编码后再拼接 URL。
 
 
 ## 反向代理如何在 Account 为空时处理
@@ -97,7 +109,7 @@
 
 "*" 就是最后的兜底。一个条目可以包含多个请求头，意味着可以进行猜测。依次查询请求头的值，第一个存在且非空的被采用。
 当提取模式为 `FIXED_HEADER` 或 `ACCOUNT_HEADER_RULE` 且提取失败时，根据 Platform 的 `ReverseProxyMissAction` 配置，决定是做随机路由还是拒绝本次代理。
-另外，Account 来源优先级固定为：`X-Resin-Account` 请求头 > URL 身份段（解码后）的 Account > 请求头提取规则。
+另外，Account 来源优先级固定为：【`X-Resin-Account` 请求头】 > 【URL 身份段（解码后）的 Account】 > 【请求头提取规则】。
 反向代理身份段接口保留“手工调试友好”定位：常规场景可直接手写 `Platform.Account` / `Platform:Account`。若身份段包含 URL 路径保留字符（例如 `/`），调用方应仅对身份段按 Path Segment 规则编码后再拼接（base + "/" + token + "/" + encode(identity) + "/" + protocol + "/" + host + "/" + path
 ）。该接口用于简单接入与手动调试；正式客户端集成推荐通过 `X-Resin-Account` 传递 Account。若输入导致路径分段异常，则按 URL 解析错误处理。
 
