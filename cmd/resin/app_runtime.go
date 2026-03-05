@@ -230,7 +230,14 @@ func (a *resinApp) bootstrapFromPersistence(engine *state.StateEngine) error {
 	}
 
 	// Phase 6.1: Bootstrap nodes (steps 3-6: static, subscription_nodes, dynamic, latency).
-	if err := bootstrapNodes(engine, a.topoRuntime.pool, a.topoRuntime.subManager, a.topoRuntime.outboundMgr, a.envCfg); err != nil {
+	if err := bootstrapNodes(
+		engine,
+		a.topoRuntime.pool,
+		a.topoRuntime.subManager,
+		a.topoRuntime.outboundMgr,
+		a.envCfg,
+		runtimeConfigSnapshot(a.runtimeCfg).LatencyAuthorities,
+	); err != nil {
 		return err
 	}
 

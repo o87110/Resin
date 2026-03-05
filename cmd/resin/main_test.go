@@ -343,7 +343,7 @@ func TestBootstrapNodes_MissingDynamicDefaultsCircuitOpen(t *testing.T) {
 	}
 
 	outboundMgr := outbound.NewOutboundManager(pool, &testutil.StubOutboundBuilder{})
-	if err := bootstrapNodes(engine, pool, subManager, outboundMgr, envCfg); err != nil {
+	if err := bootstrapNodes(engine, pool, subManager, outboundMgr, envCfg, runtimeCfg.LatencyAuthorities); err != nil {
 		t.Fatalf("bootstrapNodes: %v", err)
 	}
 
@@ -415,7 +415,7 @@ func TestBootstrapNodes_DynamicRecordOverridesDefaultCircuitOpen(t *testing.T) {
 	}
 
 	outboundMgr := outbound.NewOutboundManager(pool, &testutil.StubOutboundBuilder{})
-	if err := bootstrapNodes(engine, pool, subManager, outboundMgr, envCfg); err != nil {
+	if err := bootstrapNodes(engine, pool, subManager, outboundMgr, envCfg, runtimeCfg.LatencyAuthorities); err != nil {
 		t.Fatalf("bootstrapNodes: %v", err)
 	}
 
@@ -471,7 +471,7 @@ func TestBootstrapNodes_RestoreEvictedSubscriptionNodeWithoutPoolRef(t *testing.
 	}
 
 	outboundMgr := outbound.NewOutboundManager(pool, &testutil.StubOutboundBuilder{})
-	if err := bootstrapNodes(engine, pool, subManager, outboundMgr, envCfg); err != nil {
+	if err := bootstrapNodes(engine, pool, subManager, outboundMgr, envCfg, runtimeCfg.LatencyAuthorities); err != nil {
 		t.Fatalf("bootstrapNodes: %v", err)
 	}
 
@@ -488,6 +488,125 @@ func TestBootstrapNodes_RestoreEvictedSubscriptionNodeWithoutPoolRef(t *testing.
 	}
 	if _, ok := pool.GetEntry(hash); ok {
 		t.Fatal("evicted subscription node should not restore subscription hold in pool")
+	}
+}
+
+func TestBootstrapNodes_TrimRegularLatencyKeepsAuthorities(t *testing.T) {
+	engine, closer, err := state.PersistenceBootstrap(t.TempDir(), t.TempDir())
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	const subID = "sub-bootstrap-trim-latency"
+	now := time.Now().UnixNano()
+	if err := engine.UpsertSubscription(model.Subscription{
+		ID:               subID,
+		Name:             "BootstrapSub",
+		URL:              "https://example.com/sub",
+		UpdateIntervalNs: int64(30 * time.Minute),
+		Enabled:          true,
+		Ephemeral:        false,
+		CreatedAtNs:      now,
+		UpdatedAtNs:      now,
+	}); err != nil {
+		t.Fatalf("UpsertSubscription: %v", err)
+	}
+
+	raw := json.RawMessage(`{"type":"stub","server":"198.51.100.120","server_port":443}`)
+	hash := node.HashFromRawOptions(raw)
+	hashHex := hash.Hex()
+	if err := engine.BulkUpsertNodesStatic([]model.NodeStatic{{
+		Hash:        hashHex,
+		RawOptions:  raw,
+		CreatedAtNs: now - int64(time.Hour),
+	}}); err != nil {
+		t.Fatalf("BulkUpsertNodesStatic: %v", err)
+	}
+	if err := engine.BulkUpsertSubscriptionNodes([]model.SubscriptionNode{{
+		SubscriptionID: subID,
+		NodeHash:       hashHex,
+		Tags:           []string{"bootstrap-tag"},
+	}}); err != nil {
+		t.Fatalf("BulkUpsertSubscriptionNodes: %v", err)
+	}
+
+	// 2 authority domains + 3 regular domains (capacity=2, one regular should be trimmed).
+	if err := engine.BulkUpsertNodeLatency([]model.NodeLatency{
+		{NodeHash: hashHex, Domain: "gstatic.com", EwmaNs: int64(10 * time.Millisecond), LastUpdatedNs: now - int64(1*time.Second)},
+		{NodeHash: hashHex, Domain: "github.com", EwmaNs: int64(20 * time.Millisecond), LastUpdatedNs: now - int64(2*time.Second)},
+		{NodeHash: hashHex, Domain: "recent-a.com", EwmaNs: int64(30 * time.Millisecond), LastUpdatedNs: now - int64(3*time.Second)},
+		{NodeHash: hashHex, Domain: "recent-b.com", EwmaNs: int64(40 * time.Millisecond), LastUpdatedNs: now - int64(4*time.Second)},
+		{NodeHash: hashHex, Domain: "old-c.com", EwmaNs: int64(50 * time.Millisecond), LastUpdatedNs: now - int64(5*time.Second)},
+	}); err != nil {
+		t.Fatalf("BulkUpsertNodeLatency: %v", err)
+	}
+
+	runtimeCfg := config.NewDefaultRuntimeConfig()
+	runtimeCfg.LatencyAuthorities = []string{"gstatic.com", "github.com"}
+	envCfg := newDefaultPlatformEnvConfig()
+	envCfg.MaxLatencyTableEntries = 2
+	subManager, pool := newBootstrapTestRuntime(runtimeCfg)
+
+	if err := bootstrapTopology(engine, subManager, pool, envCfg); err != nil {
+		t.Fatalf("bootstrapTopology: %v", err)
+	}
+
+	outboundMgr := outbound.NewOutboundManager(pool, &testutil.StubOutboundBuilder{})
+	if err := bootstrapNodes(engine, pool, subManager, outboundMgr, envCfg, runtimeCfg.LatencyAuthorities); err != nil {
+		t.Fatalf("bootstrapNodes: %v", err)
+	}
+
+	entry, ok := pool.GetEntry(hash)
+	if !ok || entry.LatencyTable == nil {
+		t.Fatalf("node %s missing or no latency table after bootstrap", hashHex)
+	}
+	restored := make(map[string]bool)
+	entry.LatencyTable.Range(func(domain string, _ node.DomainLatencyStats) bool {
+		restored[domain] = true
+		return true
+	})
+	for _, domain := range []string{"gstatic.com", "github.com", "recent-a.com", "recent-b.com"} {
+		if !restored[domain] {
+			t.Fatalf("expected domain %q to be restored", domain)
+		}
+	}
+	if restored["old-c.com"] {
+		t.Fatal("old regular domain should be trimmed at bootstrap")
+	}
+	// Post-bootstrap first regular insert should evict the oldest kept regular
+	// entry (recent-b.com), not the newest one (recent-a.com).
+	entry.LatencyTable.Update("fresh-d.com", 60*time.Millisecond, 30*time.Second)
+	if _, ok := entry.LatencyTable.GetDomainStats("recent-a.com"); !ok {
+		t.Fatal("recent-a.com should remain as the newer regular entry")
+	}
+	if _, ok := entry.LatencyTable.GetDomainStats("recent-b.com"); ok {
+		t.Fatal("recent-b.com should be evicted as the oldest regular entry")
+	}
+	if _, ok := entry.LatencyTable.GetDomainStats("fresh-d.com"); !ok {
+		t.Fatal("fresh-d.com should be inserted into regular LRU")
+	}
+
+	if err := engine.FlushDirtySets(newFlushReaders(pool, subManager, nil)); err != nil {
+		t.Fatalf("FlushDirtySets: %v", err)
+	}
+	latencies, err := engine.LoadAllNodeLatency()
+	if err != nil {
+		t.Fatalf("LoadAllNodeLatency: %v", err)
+	}
+	domains := make(map[string]bool)
+	for _, row := range latencies {
+		if row.NodeHash == hashHex {
+			domains[row.Domain] = true
+		}
+	}
+	for _, domain := range []string{"gstatic.com", "github.com", "recent-a.com", "recent-b.com"} {
+		if !domains[domain] {
+			t.Fatalf("expected persisted domain %q after trim flush", domain)
+		}
+	}
+	if domains["old-c.com"] {
+		t.Fatal("trimmed regular domain should be deleted from persistence")
 	}
 }
 

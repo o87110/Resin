@@ -8,6 +8,8 @@ import (
 	"net/netip"
 	"os"
 	"runtime"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -276,6 +278,9 @@ func newTopologyRuntime(
 	pool.SetOnNodeRemoved(func(hash node.Hash, entry *node.NodeEntry) {
 		markNodeRemovedDirty(engine, hash, entry)
 		outboundMgr.RemoveNodeOutbound(entry)
+		if entry != nil && entry.LatencyTable != nil {
+			entry.LatencyTable.Close()
+		}
 		if onNodeRemoved != nil {
 			onNodeRemoved(hash)
 		}
@@ -803,14 +808,39 @@ func restoreBootstrapNodeDynamics(
 func restoreBootstrapNodeLatencies(
 	engine *state.StateEngine,
 	pool *topology.GlobalNodePool,
+	maxRegularEntries int,
+	latencyAuthorities []string,
 ) error {
 	latencies, err := engine.LoadAllNodeLatency()
 	if err != nil {
 		return fmt.Errorf("load node_latency: %w", err)
 	}
 
+	if maxRegularEntries <= 0 {
+		maxRegularEntries = 1
+	}
+	authoritySet := make(map[string]struct{}, len(latencyAuthorities))
+	for _, authority := range latencyAuthorities {
+		authority = strings.ToLower(strings.TrimSpace(authority))
+		if authority == "" {
+			continue
+		}
+		authoritySet[authority] = struct{}{}
+	}
+	isAuthority := func(domain string) bool {
+		_, ok := authoritySet[strings.ToLower(strings.TrimSpace(domain))]
+		return ok
+	}
+
+	byNode := make(map[string][]model.NodeLatency)
 	for _, nl := range latencies {
-		hash, err := node.ParseHex(nl.NodeHash)
+		byNode[nl.NodeHash] = append(byNode[nl.NodeHash], nl)
+	}
+
+	loadedCount := 0
+	trimmedCount := 0
+	for nodeHash, rows := range byNode {
+		hash, err := node.ParseHex(nodeHash)
 		if err != nil {
 			continue
 		}
@@ -818,12 +848,49 @@ func restoreBootstrapNodeLatencies(
 		if !ok || entry.LatencyTable == nil {
 			continue
 		}
-		entry.LatencyTable.LoadEntry(nl.Domain, node.DomainLatencyStats{
-			Ewma:        time.Duration(nl.EwmaNs),
-			LastUpdated: time.Unix(0, nl.LastUpdatedNs),
+
+		authorities := make([]model.NodeLatency, 0, len(rows))
+		regular := make([]model.NodeLatency, 0, len(rows))
+		for _, row := range rows {
+			if isAuthority(row.Domain) {
+				authorities = append(authorities, row)
+			} else {
+				regular = append(regular, row)
+			}
+		}
+		sort.SliceStable(regular, func(i, j int) bool {
+			if regular[i].LastUpdatedNs == regular[j].LastUpdatedNs {
+				return regular[i].Domain < regular[j].Domain
+			}
+			return regular[i].LastUpdatedNs > regular[j].LastUpdatedNs
 		})
+		if len(regular) > maxRegularEntries {
+			for _, dropped := range regular[maxRegularEntries:] {
+				engine.MarkNodeLatencyDelete(dropped.NodeHash, dropped.Domain)
+				trimmedCount++
+			}
+			regular = regular[:maxRegularEntries]
+		}
+
+		for _, row := range authorities {
+			entry.LatencyTable.LoadEntryClassified(row.Domain, node.DomainLatencyStats{
+				Ewma:        time.Duration(row.EwmaNs),
+				LastUpdated: time.Unix(0, row.LastUpdatedNs),
+			}, true)
+			loadedCount++
+		}
+		// regular is sorted by LastUpdated desc (newest -> oldest).
+		// Load in reverse so in-memory LRU order stays oldest -> newest.
+		for i := len(regular) - 1; i >= 0; i-- {
+			row := regular[i]
+			entry.LatencyTable.LoadEntryClassified(row.Domain, node.DomainLatencyStats{
+				Ewma:        time.Duration(row.EwmaNs),
+				LastUpdated: time.Unix(0, row.LastUpdatedNs),
+			}, false)
+			loadedCount++
+		}
 	}
-	log.Printf("Loaded %d latency entries from cache.db", len(latencies))
+	log.Printf("Loaded %d latency entries from cache.db (trimmed=%d)", loadedCount, trimmedCount)
 	return nil
 }
 
@@ -835,6 +902,7 @@ func bootstrapNodes(
 	subManager *topology.SubscriptionManager,
 	outboundMgr *outbound.OutboundManager,
 	envCfg *config.EnvConfig,
+	latencyAuthorities []string,
 ) error {
 	hashes, err := loadBootstrapNodeStatics(engine, pool, envCfg)
 	if err != nil {
@@ -849,7 +917,12 @@ func bootstrapNodes(
 	if err := restoreBootstrapNodeDynamics(engine, pool); err != nil {
 		return err
 	}
-	if err := restoreBootstrapNodeLatencies(engine, pool); err != nil {
+	if err := restoreBootstrapNodeLatencies(
+		engine,
+		pool,
+		envCfg.MaxLatencyTableEntries,
+		latencyAuthorities,
+	); err != nil {
 		return err
 	}
 	return nil

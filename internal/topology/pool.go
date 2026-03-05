@@ -43,7 +43,7 @@ type GlobalNodePool struct {
 
 	// Health callbacks (optional).
 	onNodeDynamicChanged func(hash node.Hash)                // fired on circuit/failure/egress changes
-	onNodeLatencyChanged func(hash node.Hash, domain string) // fired on latency record updates
+	onNodeLatencyChanged func(hash node.Hash, domain string) // fired on latency upserts and evictions
 
 	// Health config
 	maxLatencyTableEntries int
@@ -525,9 +525,10 @@ func (p *GlobalNodePool) RecordLatency(hash node.Hash, rawTarget string, latency
 	}
 
 	domain := netutil.ExtractDomain(rawTarget)
+	isAuthority := p.isAuthorityDomain(domain)
 	nowNs := time.Now().UnixNano()
 	entry.LastLatencyProbeAttempt.Store(nowNs)
-	if p.isAuthorityDomain(domain) {
+	if isAuthority {
 		entry.LastAuthorityLatencyProbeAttempt.Store(nowNs)
 	}
 	if p.onNodeDynamicChanged != nil {
@@ -546,7 +547,7 @@ func (p *GlobalNodePool) RecordLatency(hash node.Hash, rawTarget string, latency
 		decayWindow = 30 * time.Second // default
 	}
 
-	wasEmpty := entry.LatencyTable.Update(domain, *latency, decayWindow)
+	wasEmpty, evictedDomain, evicted := entry.LatencyTable.UpdateClassified(domain, *latency, decayWindow, isAuthority)
 
 	// If the table transitioned from empty to non-empty, the node might
 	// now satisfy the HasLatency filter — notify platforms.
@@ -556,6 +557,9 @@ func (p *GlobalNodePool) RecordLatency(hash node.Hash, rawTarget string, latency
 
 	if p.onNodeLatencyChanged != nil {
 		p.onNodeLatencyChanged(hash, domain)
+		if evicted {
+			p.onNodeLatencyChanged(hash, evictedDomain)
+		}
 	}
 }
 

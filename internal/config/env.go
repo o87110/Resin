@@ -85,7 +85,7 @@ func LoadEnvConfig() (*EnvConfig, error) {
 	cfg.APIMaxBodyBytes = envInt("RESIN_API_MAX_BODY_BYTES", 1<<20, &errs)
 
 	// --- Core ---
-	cfg.MaxLatencyTableEntries = envInt("RESIN_MAX_LATENCY_TABLE_ENTRIES", 128, &errs)
+	cfg.MaxLatencyTableEntries = envInt("RESIN_MAX_LATENCY_TABLE_ENTRIES", 12, &errs)
 	cfg.ProbeConcurrency = envInt("RESIN_PROBE_CONCURRENCY", 1000, &errs)
 	cfg.GeoIPUpdateSchedule = envStr("RESIN_GEOIP_UPDATE_SCHEDULE", "0 7 * * *")
 	cfg.DefaultPlatformStickyTTL = envDuration("RESIN_DEFAULT_PLATFORM_STICKY_TTL", 7*24*time.Hour, &errs)
@@ -159,6 +159,9 @@ func LoadEnvConfig() (*EnvConfig, error) {
 	validatePositive("RESIN_API_MAX_BODY_BYTES", cfg.APIMaxBodyBytes, &errs)
 
 	validatePositive("RESIN_MAX_LATENCY_TABLE_ENTRIES", cfg.MaxLatencyTableEntries, &errs)
+	if cfg.MaxLatencyTableEntries > 32 {
+		errs = append(errs, "RESIN_MAX_LATENCY_TABLE_ENTRIES must be <= 32")
+	}
 	validatePositive("RESIN_PROBE_CONCURRENCY", cfg.ProbeConcurrency, &errs)
 	if _, err := cron.ParseStandard(cfg.GeoIPUpdateSchedule); err != nil {
 		errs = append(errs, fmt.Sprintf("RESIN_GEOIP_UPDATE_SCHEDULE: invalid cron expression %q: %v", cfg.GeoIPUpdateSchedule, err))

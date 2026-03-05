@@ -52,19 +52,76 @@ func TestLatencyTable_TDEWMA_Decay(t *testing.T) {
 	}
 }
 
-func TestLatencyTable_BoundedEviction(t *testing.T) {
-	capacity := 4
-	lt := NewLatencyTable(capacity)
+func TestLatencyTable_BoundedEviction_RegularLRU(t *testing.T) {
+	lt := NewLatencyTable(2)
+	lt.Update("a.com", 10*time.Millisecond, 30*time.Second)
+	lt.Update("b.com", 20*time.Millisecond, 30*time.Second)
+	lt.Update("c.com", 30*time.Millisecond, 30*time.Second)
 
-	// Add more entries than capacity.
-	for i := 0; i < capacity+10; i++ {
-		domain := "domain" + string(rune('A'+i)) + ".com"
-		lt.Update(domain, time.Duration(i+1)*time.Millisecond, 30*time.Second)
+	if _, ok := lt.GetDomainStats("a.com"); ok {
+		t.Fatal("expected oldest regular entry to be evicted")
 	}
+	if _, ok := lt.GetDomainStats("b.com"); !ok {
+		t.Fatal("expected b.com to remain in regular LRU")
+	}
+	if _, ok := lt.GetDomainStats("c.com"); !ok {
+		t.Fatal("expected c.com to remain in regular LRU")
+	}
+}
 
-	// Size may be <= capacity due to eviction (otter is probabilistic but bounded).
-	if lt.Size() > capacity+2 { // allow small margin for async eviction
-		t.Fatalf("expected at most %d entries (with margin), got %d", capacity+2, lt.Size())
+func TestLatencyTable_Get_TouchesRegularLRU(t *testing.T) {
+	lt := NewLatencyTable(2)
+	lt.Update("a.com", 10*time.Millisecond, 30*time.Second)
+	lt.Update("b.com", 20*time.Millisecond, 30*time.Second)
+
+	// Read touch is throttled; wait over the minimum interval first.
+	time.Sleep(latencyReadTouchMinInterval + 20*time.Millisecond)
+	if _, ok := lt.GetDomainStats("a.com"); !ok {
+		t.Fatal("expected a.com to exist")
+	}
+	lt.Update("c.com", 30*time.Millisecond, 30*time.Second)
+
+	if _, ok := lt.GetDomainStats("b.com"); ok {
+		t.Fatal("expected b.com to be evicted after read-touch on a.com")
+	}
+	if _, ok := lt.GetDomainStats("a.com"); !ok {
+		t.Fatal("expected a.com to stay due to read-touch")
+	}
+	if _, ok := lt.GetDomainStats("c.com"); !ok {
+		t.Fatal("expected c.com to exist")
+	}
+}
+
+func TestLatencyTable_AuthorityResident(t *testing.T) {
+	lt := NewLatencyTable(1)
+
+	lt.UpdateClassified("gstatic.com", 5*time.Millisecond, 30*time.Second, true)
+	lt.Update("a.com", 10*time.Millisecond, 30*time.Second)
+	lt.Update("b.com", 20*time.Millisecond, 30*time.Second)
+
+	if _, ok := lt.GetDomainStats("gstatic.com"); !ok {
+		t.Fatal("authority domain should stay resident")
+	}
+	if _, ok := lt.GetDomainStats("a.com"); ok {
+		t.Fatal("oldest regular entry should be evicted")
+	}
+	if _, ok := lt.GetDomainStats("b.com"); !ok {
+		t.Fatal("latest regular entry should remain")
+	}
+}
+
+func TestLatencyTable_ClassifiedUpdate_MigratesPartitions(t *testing.T) {
+	lt := NewLatencyTable(1)
+
+	lt.UpdateClassified("x.com", 10*time.Millisecond, 30*time.Second, true)
+	lt.UpdateClassified("x.com", 20*time.Millisecond, 30*time.Second, false) // authority -> regular
+	lt.Update("y.com", 30*time.Millisecond, 30*time.Second)                  // evicts oldest regular (x.com)
+
+	if _, ok := lt.GetDomainStats("x.com"); ok {
+		t.Fatal("x.com should be evicted after migrating to regular partition")
+	}
+	if _, ok := lt.GetDomainStats("y.com"); !ok {
+		t.Fatal("y.com should remain in regular partition")
 	}
 }
 

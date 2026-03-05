@@ -48,7 +48,8 @@ type NodeEntry struct {
 }
 
 // NewNodeEntry creates a NodeEntry with the given static fields.
-// maxLatencyTableEntries controls the bounded size of the per-domain latency table.
+// maxLatencyTableEntries controls the bounded size of the regular-domain LRU
+// partition in the per-domain latency table.
 // Pass 0 to skip latency table initialization (e.g. in tests that don't need it).
 func NewNodeEntry(hash Hash, rawOptions json.RawMessage, createdAt time.Time, maxLatencyTableEntries int) *NodeEntry {
 	e := &NodeEntry{

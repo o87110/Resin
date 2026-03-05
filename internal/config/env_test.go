@@ -42,7 +42,7 @@ func TestLoadEnvConfig_Defaults(t *testing.T) {
 	assertEqual(t, "APIMaxBodyBytes", cfg.APIMaxBodyBytes, 1<<20)
 
 	// Core
-	assertEqual(t, "MaxLatencyTableEntries", cfg.MaxLatencyTableEntries, 128)
+	assertEqual(t, "MaxLatencyTableEntries", cfg.MaxLatencyTableEntries, 12)
 	assertEqual(t, "ProbeConcurrency", cfg.ProbeConcurrency, 1000)
 	assertEqual(t, "GeoIPUpdateSchedule", cfg.GeoIPUpdateSchedule, "0 7 * * *")
 	assertEqual(t, "DefaultPlatformStickyTTL", cfg.DefaultPlatformStickyTTL, 7*24*time.Hour)
@@ -337,6 +337,19 @@ func TestLoadEnvConfig_NegativeValue(t *testing.T) {
 		t.Fatal("expected error for negative value")
 	}
 	assertContains(t, err.Error(), "RESIN_PROBE_CONCURRENCY")
+}
+
+func TestLoadEnvConfig_MaxLatencyTableEntriesOutOfRange(t *testing.T) {
+	envs := requiredEnvs()
+	envs["RESIN_MAX_LATENCY_TABLE_ENTRIES"] = "33"
+	setEnvs(t, envs)
+
+	_, err := LoadEnvConfig()
+	if err == nil {
+		t.Fatal("expected error for RESIN_MAX_LATENCY_TABLE_ENTRIES > 32")
+	}
+	assertContains(t, err.Error(), "RESIN_MAX_LATENCY_TABLE_ENTRIES")
+	assertContains(t, err.Error(), "<= 32")
 }
 
 func TestLoadEnvConfig_InvalidGeoIPSchedule(t *testing.T) {

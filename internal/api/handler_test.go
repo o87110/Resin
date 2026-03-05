@@ -23,7 +23,7 @@ func newTestServer() *Server {
 		ListenAddress:                         "127.0.0.1",
 		ResinPort:                             2260,
 		APIMaxBodyBytes:                       1 << 20,
-		MaxLatencyTableEntries:                128,
+		MaxLatencyTableEntries:                12,
 		ProbeConcurrency:                      1000,
 		GeoIPUpdateSchedule:                   "0 7 * * *",
 		DefaultPlatformStickyTTL:              7 * 24 * time.Hour,

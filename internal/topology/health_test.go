@@ -2,6 +2,7 @@ package topology
 
 import (
 	"net/netip"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -235,6 +236,74 @@ func TestRecordLatency_FirstRecord_PlatformDirty(t *testing.T) {
 	pool.RecordLatency(h, "example.com", &latency)
 	if latencyCBCount.Load() != 1 {
 		t.Fatalf("expected 1 latency callback, got %d", latencyCBCount.Load())
+	}
+}
+
+func TestRecordLatency_AuthorityResident_RegularBounded(t *testing.T) {
+	pool := NewGlobalNodePool(PoolConfig{
+		SubLookup:              NewSubscriptionManager().Lookup,
+		GeoLookup:              func(netip.Addr) string { return "" },
+		MaxLatencyTableEntries: 1,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyAuthorities:     func() []string { return []string{"gstatic.com"} },
+	})
+
+	raw := `{"type":"ss","n":"authority-resident"}`
+	h := node.HashFromRawOptions([]byte(raw))
+	pool.AddNodeFromSub(h, []byte(raw), "s1")
+
+	l1 := 10 * time.Millisecond
+	l2 := 20 * time.Millisecond
+	l3 := 30 * time.Millisecond
+	pool.RecordLatency(h, "gstatic.com", &l1)
+	pool.RecordLatency(h, "a.com", &l2)
+	pool.RecordLatency(h, "b.com", &l3)
+
+	entry, _ := pool.GetEntry(h)
+	if _, ok := entry.LatencyTable.GetDomainStats("gstatic.com"); !ok {
+		t.Fatal("authority domain should remain resident")
+	}
+	if _, ok := entry.LatencyTable.GetDomainStats("a.com"); ok {
+		t.Fatal("oldest regular entry should be evicted at capacity 1")
+	}
+	if _, ok := entry.LatencyTable.GetDomainStats("b.com"); !ok {
+		t.Fatal("latest regular entry should remain")
+	}
+}
+
+func TestRecordLatency_RegularEviction_EmitsEvictedDomainCallback(t *testing.T) {
+	subMgr := NewSubscriptionManager()
+	domainCounts := map[string]int{}
+	var countsMu sync.Mutex
+
+	pool := NewGlobalNodePool(PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "" },
+		MaxLatencyTableEntries: 1,
+		MaxConsecutiveFailures: func() int { return 3 },
+		OnNodeLatencyChanged: func(_ node.Hash, domain string) {
+			countsMu.Lock()
+			domainCounts[domain]++
+			countsMu.Unlock()
+		},
+	})
+
+	raw := `{"type":"ss","n":"eviction-callback"}`
+	h := node.HashFromRawOptions([]byte(raw))
+	pool.AddNodeFromSub(h, []byte(raw), "s1")
+
+	l1 := 10 * time.Millisecond
+	l2 := 20 * time.Millisecond
+	pool.RecordLatency(h, "a.com", &l1)
+	pool.RecordLatency(h, "b.com", &l2)
+
+	countsMu.Lock()
+	defer countsMu.Unlock()
+	if domainCounts["a.com"] != 2 {
+		t.Fatalf("expected a.com callback twice (upsert + eviction), got %d", domainCounts["a.com"])
+	}
+	if domainCounts["b.com"] != 1 {
+		t.Fatalf("expected b.com callback once, got %d", domainCounts["b.com"])
 	}
 }
 

@@ -187,8 +187,10 @@ No available proxy nodes
 	* Outbound：atomic.Pointer[adapter.Outbound]，sing-box 的 Outbound 实例。可能为空，例如 Outbound 创建失败。空 Outbound 节点不可路由。
 	* --- Dynamic information ---
 	* FailureCount：连续失败的次数。
-	* LatencyTable：`otter.Must(&otter.Options[string, DomainLatencyStats]{ MaximumSize: RESIN_MAX_LATENCY_TABLE_ENTRIES })` 类型，使用 eTLD+1 域名作为索引，记录各站点的节点延迟。使用 TD-EWMA 维护。
-		* DomainLatencyStats 包含 Latency 与 LastUpdated 两个字段。
+  * LatencyTable：极简内存结构，分为 **Authority 常驻区** 与 **普通站点 LRU 区**。普通站点 LRU 区大小由 `RESIN_MAX_LATENCY_TABLE_ENTRIES` 控制，使用 eTLD+1 域名作为索引，记录各站点的节点延迟。使用 TD-EWMA 维护。
+    * 具体索引实现：用 `xxh3(domain)` 的 64-bit key 做匹配，不再做碰撞校验。这是有意的内存/性能取舍，接受极低概率的 hash 碰撞，代价仅仅是节点随机路由的时候，延迟分数有极低的概率有误差。
+    * 普通站点区的淘汰语义是“近似 LRU”而非严格 LRU：读取触摸有写节流（最小触摸间隔 100ms），短间隔高频读取不会每次都会刷新最近访问时间。
+    * DomainLatencyStats 包含 Latency 与 LastUpdated 两个字段。
 	* EgressInfo：netip.Addr 类型，节点的出口 IP。
 	* LastEgressUpdate：最后一次成功更新出口 IP 的时间戳。
 	* LastLatencyProbeAttempt：最后一次延迟探测尝试时间戳（主动/被动、成功/失败都会更新）。
@@ -2209,7 +2211,7 @@ GeoIP 与订阅的下载都有错误重试的需求。
 * RESIN_API_MAX_BODY_BYTES：控制面 API（`/api/*`）请求体最大字节数。超限返回 `413 PAYLOAD_TOO_LARGE`。仅作用于控制面，不作用于正/反向代理数据面。默认 1048576（1 MiB）。
 
 核心设置：
-* `RESIN_MAX_LATENCY_TABLE_ENTRIES`：每个节点的延迟表的最大表项数。默认 128。
+* `RESIN_MAX_LATENCY_TABLE_ENTRIES`：每个节点延迟表中“普通站点 LRU 区”的最大表项数。默认 12，最大 32（超限启动失败）。
 * `RESIN_PROBE_CONCURRENCY`：节点探测的最大并发数量，默认 1000。
 * `RESIN_GEOIP_UPDATE_SCHEDULE`：GeoIP 数据库自动更新的 Cron 表达式。默认 "0 7 * * *"。
 * `RESIN_DEFAULT_PLATFORM_STICKY_TTL`：默认平台粘性会话时长。默认 "168h"。
