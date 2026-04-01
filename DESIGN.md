@@ -2283,6 +2283,19 @@ GeoIP 与订阅的下载都有错误重试的需求。
 * `RESIN_METRIC_LATENCY_BIN_WIDTH_MS`：延迟统计桶大小，默认 100ms。
 * `RESIN_METRIC_LATENCY_BIN_OVERFLOW_MS`：延迟统计溢出值，默认 3000ms。
 
+### 节点默认 DNS 解析链
+Resin 托管节点的默认域名解析使用固定安全 DNS 链，不通过环境变量配置：
+1. `https://doh.pub/dns-query`
+2. `https://dns.alidns.com/dns-query`
+3. `tls://223.5.5.5`
+4. `local`
+
+说明：
+* 正常情况下，优先使用前 3 个安全 DNS 上游。
+* 当前 3 个安全 DNS 上游全部失败时，降级回退到 `local`，保证节点仍可解析和连通。
+* `doh.pub` 与 `dns.alidns.com` 这两个 DoH 域名自身的 bootstrap 解析继续使用 `local`。
+* 此默认 DNS 链仅作用于 Resin 内部 sing-box builder 上下文中的默认域名解析；订阅下载、GeoIP 下载等其他下载路径仍保持原有行为。
+
 ### 运行时全局设置项（支持热更新）
 Resin 支持通过 API (`PATCH /system/config`) 动态调整大部分全局运行参数。配置文件存储于数据库。
 以下所有配置项支持热更新。
