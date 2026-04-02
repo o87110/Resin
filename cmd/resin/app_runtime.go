@@ -43,6 +43,8 @@ type resinApp struct {
 	inboundSrv     *http.Server
 	inboundLn      net.Listener
 	transportPool  *proxy.OutboundTransportPool
+	socks5Srv     *proxy.Socks5Handler
+
 }
 
 func run() error {
@@ -443,6 +445,20 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 	a.inboundLn = proxy.NewCountingListener(inboundLn, a.metricsManager)
 	a.inboundSrv = &http.Server{Handler: inboundHandler}
 
+	// SOCKS5 inbound (optional).
+	if a.envCfg.Socks5Port > 0 {
+		a.socks5Srv = proxy.NewSocks5Handler(proxy.Socks5HandlerConfig{
+			ProxyToken:  a.envCfg.ProxyToken,
+			AuthVersion: string(a.envCfg.AuthVersion),
+			Router:      a.topoRuntime.router,
+			Pool:        a.topoRuntime.pool,
+			Health:      a.topoRuntime.pool,
+			Events:      proxyEvents,
+			MetricsSink: a.metricsManager,
+			Timeout:     a.envCfg.Socks5Timeout,
+		})
+	}
+
 	return nil
 }
 
@@ -486,11 +502,115 @@ func (a *resinApp) startServers() <-chan error {
 	}
 
 	go func() {
-		log.Printf("Resin server starting on %s", formatListenURL(a.envCfg.ListenAddress, a.envCfg.ResinPort))
-		reportServerErr("resin server", a.inboundSrv.Serve(a.inboundLn))
+		log.Printf("Resin server starting on %s (HTTP%s)", formatListenURL(a.envCfg.ListenAddress, a.envCfg.ResinPort), socks5EnabledLabel(a.socks5Srv))
+		reportServerErr("resin server", a.sniffAndServe(a.inboundLn))
 	}()
 
 	return serverErrCh
+}
+
+// sniffAndServe accepts connections, peeks the first byte, and routes:
+// 0x05 -> SOCKS5 handler (in goroutine), otherwise -> HTTP server.
+// Uses a channel-based listener to feed HTTP connections to http.Server.Serve.
+func (a *resinApp) sniffAndServe(ln net.Listener) error {
+	// Channel listener for HTTP connections.
+	chLn := &channelListener{connCh: make(chan net.Conn, 128)}
+	httpDone := make(chan error, 1)
+	go func() { httpDone <- a.inboundSrv.Serve(chLn) }()
+
+	var tempDelay time.Duration
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			chLn.Close()
+			<-httpDone
+			// Retry on temporary errors, like http.Server.Serve does.
+			if ne, ok := err.(net.Error); ok && ne.Temporary() {
+				if tempDelay == 0 {
+					tempDelay = 5 * time.Millisecond
+				} else {
+					tempDelay *= 2
+				}
+				if max := 1 * time.Second; tempDelay > max {
+					tempDelay = max
+				}
+				continue
+			}
+			return err
+		}
+		tempDelay = 0
+
+		// Peek first byte to determine protocol.
+		// 0x05 = potential SOCKS5 (version byte).
+		// Since this port serves plain HTTP (no TLS), legitimate HTTP requests
+		// will start with an ASCII letter (GET/POST/CONNECT etc.), never 0x05.
+		peek := make([]byte, 1)
+		n, peekErr := conn.Read(peek)
+		if peekErr != nil {
+			conn.Close()
+			continue
+		}
+		if peek[0] == 0x05 && a.socks5Srv != nil {
+			go a.socks5Srv.ServeConn(&prefixedConn{Conn: conn, prefix: peek[:n]})
+		} else if peek[0] == 0x04 && a.socks5Srv != nil {
+			go a.socks5Srv.ServeConnSOCKS4(&prefixedConn{Conn: conn, prefix: peek[:n]})
+		} else {
+			chLn.deliver(&prefixedConn{Conn: conn, prefix: peek[:n]})
+		}
+	}
+}
+
+// channelListener feeds connections from a channel to http.Server.Serve.
+type channelListener struct {
+	connCh chan net.Conn
+	closed atomic.Bool
+}
+
+func (l *channelListener) Accept() (net.Conn, error) {
+	c, ok := <-l.connCh
+	if !ok {
+		return nil, net.ErrClosed
+	}
+	return c, nil
+}
+
+func (l *channelListener) Close() error {
+	if l.closed.CompareAndSwap(false, true) {
+		close(l.connCh)
+	}
+	return nil
+}
+
+func (l *channelListener) Addr() net.Addr { return &net.TCPAddr{IP: net.IPv4zero, Port: 0} }
+
+func (l *channelListener) deliver(c net.Conn) {
+	select {
+	case l.connCh <- c:
+	default:
+		c.Close()
+	}
+}
+
+// prefixedConn prepends already-read bytes before the underlying connection.
+type prefixedConn struct {
+	net.Conn
+	prefix []byte
+}
+
+func (c *prefixedConn) Read(b []byte) (int, error) {
+	if len(c.prefix) > 0 {
+		n := copy(b, c.prefix)
+		c.prefix = c.prefix[n:]
+		return n, nil
+	}
+	return c.Conn.Read(b)
+}
+
+func socks5EnabledLabel(h *proxy.Socks5Handler) string {
+	if h == nil {
+		return ""
+	}
+	return " + SOCKS4/SOCKS5"
 }
 
 func waitForShutdown(serverErrCh <-chan error) error {
