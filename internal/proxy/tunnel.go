@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/Resinat/Resin/internal/netutil"
@@ -144,23 +145,33 @@ func pumpPreparedTunnelReader(
 		n   int64
 		err error
 	}
+	var closeBothOnce sync.Once
+	closeBoth := func() {
+		closeBothOnce.Do(func() {
+			_ = clientConn.Close()
+			_ = session.upstreamConn.Close()
+		})
+	}
 	ingressBytesCh := make(chan copyResult, 1)
 	egressBytesCh := make(chan copyResult, 1)
 	go func() {
 		n, copyErr := io.Copy(session.upstreamConn, clientToUpstream)
-		closeWriteConn(session.upstreamConn)
+		if !isBenignTunnelCopyError(copyErr) || !closeWriteConn(session.upstreamConn) {
+			closeBoth()
+		}
 		egressBytesCh <- copyResult{n: n, err: copyErr}
 	}()
 	go func() {
 		n, copyErr := io.Copy(clientConn, session.upstreamConn)
-		closeWriteConn(clientConn)
+		if !isBenignTunnelCopyError(copyErr) || !closeWriteConn(clientConn) {
+			closeBoth()
+		}
 		ingressBytesCh <- copyResult{n: n, err: copyErr}
 	}()
 
 	ingressResult := <-ingressBytesCh
 	egressResult := <-egressBytesCh
-	_ = clientConn.Close()
-	_ = session.upstreamConn.Close()
+	closeBoth()
 	lifecycle.addIngressBytes(ingressResult.n)
 	lifecycle.addEgressBytes(egressResult.n)
 
@@ -189,15 +200,8 @@ func pumpPreparedTunnelReader(
 	session.recordResult(okResult)
 }
 
-func closeWriteConn(conn net.Conn) {
-	if conn == nil {
-		return
-	}
-	closeWriter, ok := conn.(interface{ CloseWrite() error })
-	if !ok {
-		return
-	}
-	_ = closeWriter.CloseWrite()
+func closeWriteConn(conn net.Conn) bool {
+	return closeWriteErr(conn) == nil
 }
 
 // makeTunnelClientReader returns a reader for client->upstream copy that

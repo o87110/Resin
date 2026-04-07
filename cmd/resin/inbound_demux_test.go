@@ -20,6 +20,35 @@ type stubSocksHandler struct {
 	firstByteCh chan byte
 }
 
+type demuxHalfCloseConn struct {
+	net.Conn
+	closeWriteCalls int
+	closeReadCalls  int
+}
+
+func (c *demuxHalfCloseConn) Read(_ []byte) (int, error)         { return 0, io.EOF }
+func (c *demuxHalfCloseConn) Write(b []byte) (int, error)        { return len(b), nil }
+func (c *demuxHalfCloseConn) LocalAddr() net.Addr                { return stubAddr("local") }
+func (c *demuxHalfCloseConn) RemoteAddr() net.Addr               { return stubAddr("remote") }
+func (c *demuxHalfCloseConn) SetDeadline(_ time.Time) error      { return nil }
+func (c *demuxHalfCloseConn) SetReadDeadline(_ time.Time) error  { return nil }
+func (c *demuxHalfCloseConn) SetWriteDeadline(_ time.Time) error { return nil }
+func (c *demuxHalfCloseConn) Close() error                       { return nil }
+func (c *demuxHalfCloseConn) CloseWrite() error {
+	c.closeWriteCalls++
+	return nil
+}
+
+func (c *demuxHalfCloseConn) CloseRead() error {
+	c.closeReadCalls++
+	return nil
+}
+
+type stubAddr string
+
+func (a stubAddr) Network() string { return "tcp" }
+func (a stubAddr) String() string  { return string(a) }
+
 type temporaryNetError struct {
 	err error
 }
@@ -407,6 +436,70 @@ func TestInboundDemux_ShutdownUnblocksSocksHandshakePhase(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for demux server to stop")
+	}
+}
+
+func TestPrebufferedConn_ForwardsHalfClose(t *testing.T) {
+	base := &demuxHalfCloseConn{}
+	reader := bufio.NewReader(strings.NewReader("prefetched"))
+	if _, err := reader.Peek(len("prefetched")); err != nil {
+		t.Fatalf("Peek: %v", err)
+	}
+
+	conn, err := newPrebufferedConn(base, reader)
+	if err != nil {
+		t.Fatalf("newPrebufferedConn: %v", err)
+	}
+	if _, ok := conn.(*prebufferedConn); !ok {
+		t.Fatal("expected wrapped prebufferedConn")
+	}
+
+	closeWriter, ok := conn.(interface{ CloseWrite() error })
+	if !ok {
+		t.Fatal("prebufferedConn should preserve CloseWrite")
+	}
+	closeReader, ok := conn.(interface{ CloseRead() error })
+	if !ok {
+		t.Fatal("prebufferedConn should preserve CloseRead")
+	}
+
+	if err := closeWriter.CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite: %v", err)
+	}
+	if err := closeReader.CloseRead(); err != nil {
+		t.Fatalf("CloseRead: %v", err)
+	}
+	if base.closeWriteCalls != 1 {
+		t.Fatalf("CloseWrite calls: got %d, want 1", base.closeWriteCalls)
+	}
+	if base.closeReadCalls != 1 {
+		t.Fatalf("CloseRead calls: got %d, want 1", base.closeReadCalls)
+	}
+}
+
+func TestPrebufferedConn_CloseWriteReportsUnsupportedUnderlying(t *testing.T) {
+	base, peer := net.Pipe()
+	defer base.Close()
+	defer peer.Close()
+
+	reader := bufio.NewReader(strings.NewReader("prefetched"))
+	if _, err := reader.Peek(len("prefetched")); err != nil {
+		t.Fatalf("Peek: %v", err)
+	}
+	conn, err := newPrebufferedConn(base, reader)
+	if err != nil {
+		t.Fatalf("newPrebufferedConn: %v", err)
+	}
+	if _, ok := conn.(*prebufferedConn); !ok {
+		t.Fatal("expected wrapped prebufferedConn")
+	}
+
+	closeWriter, ok := conn.(interface{ CloseWrite() error })
+	if !ok {
+		t.Fatal("prebufferedConn should expose CloseWrite")
+	}
+	if err := closeWriter.CloseWrite(); err == nil {
+		t.Fatal("CloseWrite should report unsupported when underlying conn cannot half-close")
 	}
 }
 

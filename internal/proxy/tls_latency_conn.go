@@ -69,17 +69,9 @@ func (c *tlsLatencyConn) Read(b []byte) (int, error) {
 }
 
 func (c *tlsLatencyConn) CloseWrite() error {
-	closeWriter, ok := c.Conn.(interface{ CloseWrite() error })
-	if !ok {
-		return nil
-	}
-	return closeWriter.CloseWrite()
+	return closeWriteErr(c.Conn)
 }
 
 func (c *tlsLatencyConn) CloseRead() error {
-	closeReader, ok := c.Conn.(interface{ CloseRead() error })
-	if !ok {
-		return nil
-	}
-	return closeReader.CloseRead()
+	return closeReadErr(c.Conn)
 }

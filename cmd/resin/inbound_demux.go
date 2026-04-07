@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+var errHalfCloseUnsupported = errors.New("half-close unsupported")
+
 type inboundConnHandler interface {
 	ServeConnContext(context.Context, net.Conn, *bufio.Reader)
 }
@@ -377,4 +379,26 @@ func (c *prebufferedConn) Read(p []byte) (int, error) {
 		return 0, net.ErrClosed
 	}
 	return c.reader.Read(p)
+}
+
+func (c *prebufferedConn) CloseWrite() error {
+	if c == nil || c.Conn == nil {
+		return net.ErrClosed
+	}
+	closeWriter, ok := c.Conn.(interface{ CloseWrite() error })
+	if !ok {
+		return errHalfCloseUnsupported
+	}
+	return closeWriter.CloseWrite()
+}
+
+func (c *prebufferedConn) CloseRead() error {
+	if c == nil || c.Conn == nil {
+		return net.ErrClosed
+	}
+	closeReader, ok := c.Conn.(interface{ CloseRead() error })
+	if !ok {
+		return errHalfCloseUnsupported
+	}
+	return closeReader.CloseRead()
 }

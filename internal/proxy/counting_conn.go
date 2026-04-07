@@ -108,19 +108,11 @@ func (c *countingConn) Close() error {
 }
 
 func (c *countingConn) CloseWrite() error {
-	closeWriter, ok := c.Conn.(interface{ CloseWrite() error })
-	if !ok {
-		return nil
-	}
-	return closeWriter.CloseWrite()
+	return closeWriteErr(c.Conn)
 }
 
 func (c *countingConn) CloseRead() error {
-	closeReader, ok := c.Conn.(interface{ CloseRead() error })
-	if !ok {
-		return nil
-	}
-	return closeReader.CloseRead()
+	return closeReadErr(c.Conn)
 }
 
 // countingListener wraps a net.Listener, emitting connection lifecycle events
@@ -159,4 +151,12 @@ func (c *connCloseNotifier) Close() error {
 		c.sink.OnConnectionLifecycle(ConnectionInbound, ConnectionClose)
 	}
 	return c.Conn.Close()
+}
+
+func (c *connCloseNotifier) CloseWrite() error {
+	return closeWriteErr(c.Conn)
+}
+
+func (c *connCloseNotifier) CloseRead() error {
+	return closeReadErr(c.Conn)
 }
