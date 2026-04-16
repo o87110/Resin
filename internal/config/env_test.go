@@ -77,6 +77,7 @@ func TestLoadEnvConfig_Defaults(t *testing.T) {
 
 	// Auth
 	assertEqual(t, "AuthVersion", cfg.AuthVersion, AuthVersionLegacyV0)
+	assertEqual(t, "Socks5Timeout", cfg.Socks5Timeout, 3*time.Second)
 
 	// Metrics
 	assertEqual(t, "MetricThroughputIntervalSeconds", cfg.MetricThroughputIntervalSeconds, 2)
@@ -110,6 +111,7 @@ func TestLoadEnvConfig_EnvOverrides(t *testing.T) {
 	envs["RESIN_PROXY_TRANSPORT_MAX_IDLE_CONNS"] = "2048"
 	envs["RESIN_PROXY_TRANSPORT_MAX_IDLE_CONNS_PER_HOST"] = "128"
 	envs["RESIN_PROXY_TRANSPORT_IDLE_CONN_TIMEOUT"] = "2m"
+	envs["RESIN_SOCKS5_TIMEOUT"] = "7s"
 	envs["RESIN_REQUEST_LOG_QUEUE_FLUSH_INTERVAL"] = "10m"
 	setEnvs(t, envs)
 
@@ -149,6 +151,7 @@ func TestLoadEnvConfig_EnvOverrides(t *testing.T) {
 	assertEqual(t, "ProxyTransportMaxIdleConns", cfg.ProxyTransportMaxIdleConns, 2048)
 	assertEqual(t, "ProxyTransportMaxIdleConnsPerHost", cfg.ProxyTransportMaxIdleConnsPerHost, 128)
 	assertEqual(t, "ProxyTransportIdleConnTimeout", cfg.ProxyTransportIdleConnTimeout, 2*time.Minute)
+	assertEqual(t, "Socks5Timeout", cfg.Socks5Timeout, 7*time.Second)
 	if cfg.RequestLogQueueFlushInterval.String() != "10m0s" {
 		t.Errorf("RequestLogQueueFlushInterval: got %v, want 10m", cfg.RequestLogQueueFlushInterval)
 	}
@@ -549,6 +552,18 @@ func TestLoadEnvConfig_InvalidProxyTransportSettings(t *testing.T) {
 	}
 	assertContains(t, err.Error(), "RESIN_PROXY_TRANSPORT_IDLE_CONN_TIMEOUT")
 	assertContains(t, err.Error(), "RESIN_PROXY_TRANSPORT_MAX_IDLE_CONNS_PER_HOST")
+}
+
+func TestLoadEnvConfig_InvalidSocks5Timeout(t *testing.T) {
+	envs := requiredEnvs()
+	envs["RESIN_SOCKS5_TIMEOUT"] = "0s"
+	setEnvs(t, envs)
+
+	_, err := LoadEnvConfig()
+	if err == nil {
+		t.Fatal("expected error for invalid SOCKS5 timeout")
+	}
+	assertContains(t, err.Error(), "RESIN_SOCKS5_TIMEOUT")
 }
 
 // --- test helpers ---

@@ -43,8 +43,7 @@ type resinApp struct {
 	inboundSrv     *http.Server
 	inboundLn      net.Listener
 	transportPool  *proxy.OutboundTransportPool
-	socks5Srv     *proxy.Socks5Handler
-
+	socks5Srv      *proxy.Socks5Handler
 }
 
 func run() error {
@@ -445,19 +444,16 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 	a.inboundLn = proxy.NewCountingListener(inboundLn, a.metricsManager)
 	a.inboundSrv = &http.Server{Handler: inboundHandler}
 
-	// SOCKS5 inbound (optional).
-	if a.envCfg.Socks5Port > 0 {
-		a.socks5Srv = proxy.NewSocks5Handler(proxy.Socks5HandlerConfig{
-			ProxyToken:  a.envCfg.ProxyToken,
-			AuthVersion: string(a.envCfg.AuthVersion),
-			Router:      a.topoRuntime.router,
-			Pool:        a.topoRuntime.pool,
-			Health:      a.topoRuntime.pool,
-			Events:      proxyEvents,
-			MetricsSink: a.metricsManager,
-			Timeout:     a.envCfg.Socks5Timeout,
-		})
-	}
+	a.socks5Srv = proxy.NewSocks5Handler(proxy.Socks5HandlerConfig{
+		ProxyToken:  a.envCfg.ProxyToken,
+		AuthVersion: string(a.envCfg.AuthVersion),
+		Router:      a.topoRuntime.router,
+		Pool:        a.topoRuntime.pool,
+		Health:      a.topoRuntime.pool,
+		Events:      proxyEvents,
+		MetricsSink: a.metricsManager,
+		Timeout:     a.envCfg.Socks5Timeout,
+	})
 
 	return nil
 }
@@ -502,7 +498,10 @@ func (a *resinApp) startServers() <-chan error {
 	}
 
 	go func() {
-		log.Printf("Resin server starting on %s (HTTP%s)", formatListenURL(a.envCfg.ListenAddress, a.envCfg.ResinPort), socks5EnabledLabel(a.socks5Srv))
+		log.Printf(
+			"Resin server starting on %s (HTTP + SOCKS4/SOCKS5)",
+			formatListenURL(a.envCfg.ListenAddress, a.envCfg.ResinPort),
+		)
 		reportServerErr("resin server", a.sniffAndServe(a.inboundLn))
 	}()
 
@@ -604,13 +603,6 @@ func (c *prefixedConn) Read(b []byte) (int, error) {
 		return n, nil
 	}
 	return c.Conn.Read(b)
-}
-
-func socks5EnabledLabel(h *proxy.Socks5Handler) string {
-	if h == nil {
-		return ""
-	}
-	return " + SOCKS4/SOCKS5"
 }
 
 func waitForShutdown(serverErrCh <-chan error) error {

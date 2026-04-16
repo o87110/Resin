@@ -27,7 +27,7 @@ It helps shield your services from unstable upstream proxies and aggregates them
 - **Massive-scale management**: Easily handles 100k+ proxy nodes with native high-concurrency performance.
 - **Smart scheduling and circuit breaking**: Fully automated **passive + active** health checks, outbound IP probing, and latency analysis to remove bad nodes precisely. Uses P2C plus domain-aware latency-weighted scoring for optimal node selection.
 - **Business-friendly sticky proxying**: Keeps the same business account bound to a stable outbound IP. If a node fails, Resin seamlessly switches to another node with the same IP.
-- **Dual access modes**: Supports both standard forward proxy (HTTP Proxy) and URL-based reverse proxy.
+- **Dual access modes**: Supports both standard forward proxy (HTTP Proxy / SOCKS5) and URL-based reverse proxy.
 - **Observability**: Detailed metrics and logs, plus a visual Web UI. Includes complete structured request logs for querying and auditing by platform, account, target site, and more.
 - **Simple and powerful**: Works out of the box with default settings, while still offering deep customization for enterprise-grade needs.
 - **Cross-subscription deduplication**: Automatically merges identical nodes from different subscriptions and shares their health state.
@@ -116,6 +116,7 @@ Use one of the client access modes in the following sections.
 If you just need a high-performance, large-capacity proxy pool with automatic health management, Resin works out of the box.
 
 Once Resin is running, point your app to `http://127.0.0.1:2260`.
+The same `RESIN_PORT` accepts both HTTP Proxy and SOCKS5. If your client prefers SOCKS5, switch the proxy URL to `socks5://127.0.0.1:2260` or `socks5h://127.0.0.1:2260`.
 If you do not want a proxy password, explicitly set `RESIN_PROXY_TOKEN=""` (the variable must still be defined). Then connect directly to `http://127.0.0.1:2260`.
 
 Example with curl:
@@ -123,6 +124,14 @@ Example with curl:
 ```bash
 curl -x http://127.0.0.1:2260 \
   -U ":my-token" \
+  https://api.ipify.org
+```
+
+SOCKS5 uses the same port:
+
+```bash
+curl -x socks5h://127.0.0.1:2260 \
+  --proxy-user ":my-token" \
   https://api.ipify.org
 ```
 
@@ -174,19 +183,30 @@ First, understand two core concepts:
 
 ### Sticky proxy access formats
 
-#### Method 1: Forward proxy (HTTP Proxy)
+#### Method 1: Forward proxy (HTTP Proxy / SOCKS5)
 
 With `RESIN_AUTH_VERSION=V1`, the identity format is: `Platform.Account:RESIN_PROXY_TOKEN`.
 
 > To keep the legacy V0 format, set `RESIN_AUTH_VERSION=LEGACY_V0` and continue using `RESIN_PROXY_TOKEN:Platform:Account`.
 
-Write identity directly in proxy auth username:
+For HTTP Proxy, write identity directly in proxy auth:
 
 ```bash
 # V1 format: -U "platform.account:token"
 # Bind business account user_tom to a stable dedicated outbound IP
 curl -x http://127.0.0.1:2260 \
   -U "Default.user_tom:my-token" \
+  https://api.ipify.org
+```
+
+For SOCKS5, use the same `RESIN_PORT` and keep the same credential semantics:
+
+- V1: `username=Platform.Account`, `password=RESIN_PROXY_TOKEN`
+- LEGACY_V0: `username=RESIN_PROXY_TOKEN`, `password=Platform:Account`
+
+```bash
+curl -x socks5h://127.0.0.1:2260 \
+  --proxy-user "Default.user_tom:my-token" \
   https://api.ipify.org
 ```
 
@@ -250,7 +270,7 @@ Different clients integrate Resin differently, with different code-intrusion lev
 
 | Access Method | Code Intrusion | Notes |
 | :--- | :--- | :--- |
-| Forward proxy | 🟢 **Zero intrusion** | Just configure proxy address `http://127.0.0.1:2260` and credentials. |
+| Forward proxy | 🟢 **Zero intrusion** | Just configure proxy address `http://127.0.0.1:2260` or `socks5://127.0.0.1:2260` and credentials. |
 | Reverse proxy | 🟢 **Zero/low intrusion** | Usually only requires changing service BaseURL. |
 
 💡 **If you need sticky proxying**

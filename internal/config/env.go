@@ -57,8 +57,7 @@ type EnvConfig struct {
 	AdminToken  string
 	ProxyToken  string
 
-	// SOCKS5 inbound
-	Socks5Port    int
+	// SOCKS inbound
 	Socks5Timeout time.Duration
 
 	// Metrics
@@ -133,8 +132,7 @@ func LoadEnvConfig() (*EnvConfig, error) {
 	cfg.AdminToken = adminToken
 	cfg.ProxyToken = proxyToken
 
-	// --- SOCKS5 inbound ---
-	cfg.Socks5Port = envInt("RESIN_SOCKS5_PORT", 0, &errs)
+	// --- SOCKS inbound ---
 	cfg.Socks5Timeout = envDuration("RESIN_SOCKS5_TIMEOUT", 3*time.Second, &errs)
 
 	// --- Metrics ---
@@ -191,21 +189,21 @@ func LoadEnvConfig() (*EnvConfig, error) {
 							AuthMigrationGuideURL,
 						),
 					)
-			}
+				}
 			case AuthVersionLegacyV0:
 				if strings.Contains(cfg.ProxyToken, ":") || strings.Contains(cfg.ProxyToken, "@") {
 					errs = append(errs, "RESIN_PROXY_TOKEN must not contain ':' or '@' when RESIN_AUTH_VERSION=LEGACY_V0")
-			}
+				}
 			default:
 				// Keep validation deterministic even when auth version itself is invalid.
 				if strings.Contains(cfg.ProxyToken, ":") || strings.Contains(cfg.ProxyToken, "@") {
 					errs = append(errs, "RESIN_PROXY_TOKEN must not contain ':' or '@'")
+				}
 			}
 		}
-	}
 		if cfg.ProxyToken == "api" || cfg.ProxyToken == "healthz" || cfg.ProxyToken == "ui" {
 			errs = append(errs, "RESIN_PROXY_TOKEN must not be reserved keyword: api, healthz, ui")
-	}
+		}
 	}
 	if cfg.ListenAddress == "" {
 		errs = append(errs, "RESIN_LISTEN_ADDRESS must not be empty")
@@ -231,12 +229,10 @@ func LoadEnvConfig() (*EnvConfig, error) {
 	for _, pattern := range cfg.DefaultPlatformRegexFilters {
 		if _, err := regexp.Compile(pattern); err != nil {
 			errs = append(errs, fmt.Sprintf("RESIN_DEFAULT_PLATFORM_REGEX_FILTERS: invalid regex %q: %v", pattern, err))
+		}
 	}
-	}
-	for _, region := range cfg.DefaultPlatformRegionFilters {
-		if !isLowerAlpha2(region) {
-			errs = append(errs, fmt.Sprintf("RESIN_DEFAULT_PLATFORM_REGION_FILTERS: invalid region %q (must be lowercase ISO 3166-1 alpha-2)", region))
-	}
+	if err := platform.ValidateRegionFilters(cfg.DefaultPlatformRegionFilters); err != nil {
+		errs = append(errs, fmt.Sprintf("RESIN_DEFAULT_PLATFORM_REGION_FILTERS: %v", err))
 	}
 	normalizedMissAction := platform.NormalizeReverseProxyMissAction(cfg.DefaultPlatformReverseProxyMissAction)
 	if normalizedMissAction == "" {
@@ -318,10 +314,7 @@ func LoadEnvConfig() (*EnvConfig, error) {
 	validatePositive("RESIN_METRIC_LATENCY_BIN_WIDTH_MS", cfg.MetricLatencyBinWidthMS, &errs)
 	validatePositive("RESIN_METRIC_LATENCY_BIN_OVERFLOW_MS", cfg.MetricLatencyBinOverflowMS, &errs)
 
-	// --- SOCKS5 validation ---
-	if cfg.Socks5Port != 0 {
-		validatePort("RESIN_SOCKS5_PORT", cfg.Socks5Port, &errs)
-	}
+	// --- SOCKS inbound validation ---
 	if cfg.Socks5Timeout <= 0 {
 		errs = append(errs, "RESIN_SOCKS5_TIMEOUT must be positive")
 	}
@@ -412,7 +405,7 @@ func isLowerAlpha2(s string) bool {
 	for _, c := range s {
 		if c < 'a' || c > 'z' {
 			return false
-	}
+		}
 	}
 	return true
 }

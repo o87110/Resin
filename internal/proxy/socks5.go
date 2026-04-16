@@ -38,7 +38,7 @@ const (
 
 // SOCKS4a protocol constants.
 const (
-	socks4Version  = 0x04
+	socks4Version    = 0x04
 	socks4CmdConnect = 0x01
 	socks4RepGranted = 0x5A
 	socks4RepReject  = 0x5B
@@ -122,21 +122,11 @@ func (h *Socks5Handler) ServeConn(conn net.Conn) {
 		return
 	}
 
-	if h.token != "" && method != socks5AuthUser {
-		h.writeMethodSelection(conn, 0xFF)
-		conn.Close()
-		return
-	}
-
-	if h.token != "" {
-		h.writeMethodSelection(conn, socks5AuthUser)
-	} else {
-		h.writeMethodSelection(conn, socks5AuthNone)
-	}
+	h.writeMethodSelection(conn, method)
 
 	// Phase 2: Authentication.
 	var platName, account string
-	if h.token != "" {
+	if method == socks5AuthUser {
 		platName, account, err = h.authenticate(conn)
 		if err != nil {
 			conn.Close()
@@ -335,8 +325,16 @@ func (l *socks5Lifecycle) setUpstreamError(stage string, err error) {
 	l.log.UpstreamErrMsg = detail.Message
 }
 
-func (l *socks5Lifecycle) addIngressBytes(n int64) { if n > 0 { l.log.IngressBytes += n } }
-func (l *socks5Lifecycle) addEgressBytes(n int64)  { if n > 0 { l.log.EgressBytes += n } }
+func (l *socks5Lifecycle) addIngressBytes(n int64) {
+	if n > 0 {
+		l.log.IngressBytes += n
+	}
+}
+func (l *socks5Lifecycle) addEgressBytes(n int64) {
+	if n > 0 {
+		l.log.EgressBytes += n
+	}
+}
 
 func (l *socks5Lifecycle) setNetOK(ok bool) {
 	l.finished.NetOK = ok
@@ -354,7 +352,8 @@ func (l *socks5Lifecycle) setRouteResult(result routing.RouteResult) {
 
 // --- SOCKS5 protocol ---
 
-// readMethodSelection reads the SOCKS5 method selection message.
+// readMethodSelection reads the SOCKS5 method selection message and selects
+// the method Resin should use for this connection.
 func (h *Socks5Handler) readMethodSelection(r io.Reader) (byte, error) {
 	buf := make([]byte, 2)
 	if _, err := io.ReadFull(r, buf); err != nil {
@@ -371,15 +370,31 @@ func (h *Socks5Handler) readMethodSelection(r io.Reader) (byte, error) {
 	if _, err := io.ReadFull(r, methods); err != nil {
 		return 0, fmt.Errorf("socks5: read methods: %w", err)
 	}
+	hasNone := false
+	hasUser := false
 	for _, m := range methods {
-		if m == socks5AuthNone {
-			return m, nil
+		switch m {
+		case socks5AuthNone:
+			hasNone = true
+		case socks5AuthUser:
+			hasUser = true
 		}
 	}
-	for _, m := range methods {
-		if m == socks5AuthUser {
-			return m, nil
+
+	if h.token != "" {
+		if hasUser {
+			return socks5AuthUser, nil
 		}
+		return 0xFF, nil
+	}
+
+	// When proxy auth is disabled, still prefer username/password if the client
+	// offers it so we can preserve optional Platform/Account extraction.
+	if hasUser {
+		return socks5AuthUser, nil
+	}
+	if hasNone {
+		return socks5AuthNone, nil
 	}
 	return 0xFF, nil
 }
@@ -388,45 +403,72 @@ func (h *Socks5Handler) writeMethodSelection(w io.Writer, method byte) {
 	w.Write([]byte{socks5Version, method})
 }
 
-// authenticate performs RFC 1929 username/password sub-negotiation.
+// authenticate performs RFC 1929 username/password sub-negotiation and maps
+// the negotiated username/password pair to the same identity semantics as the
+// HTTP forward proxy.
 func (h *Socks5Handler) authenticate(rw io.ReadWriter) (string, string, error) {
 	buf := make([]byte, 2)
 	if _, err := io.ReadFull(rw, buf); err != nil {
+		h.writeUserPassStatus(rw, 0x01)
 		return "", "", fmt.Errorf("socks5: read auth header: %w", err)
 	}
 	if buf[0] != 0x01 {
+		h.writeUserPassStatus(rw, 0x01)
 		return "", "", fmt.Errorf("socks5: unsupported auth sub-negotiation version %d", buf[0])
 	}
 	uname := make([]byte, buf[1])
 	if _, err := io.ReadFull(rw, uname); err != nil {
+		h.writeUserPassStatus(rw, 0x01)
 		return "", "", fmt.Errorf("socks5: read username: %w", err)
 	}
 	plenBuf := make([]byte, 1)
 	if _, err := io.ReadFull(rw, plenBuf); err != nil {
+		h.writeUserPassStatus(rw, 0x01)
 		return "", "", fmt.Errorf("socks5: read password length: %w", err)
 	}
 	passwd := make([]byte, plenBuf[0])
 	if _, err := io.ReadFull(rw, passwd); err != nil {
+		h.writeUserPassStatus(rw, 0x01)
 		return "", "", fmt.Errorf("socks5: read password: %w", err)
 	}
 
 	username := string(uname)
 	password := string(passwd)
+	credential := username + ":" + password
+
+	if h.token == "" {
+		var platName, account string
+		if h.authVer == config.AuthVersionV1 {
+			platName, account = parseForwardCredentialV1WhenAuthDisabled(credential)
+		} else {
+			platName, account = parseLegacyAuthDisabledIdentityCredential(credential)
+		}
+		h.writeUserPassStatus(rw, 0x00)
+		return platName, account, nil
+	}
+
+	if h.authVer == config.AuthVersionV1 {
+		token, platName, account := parseForwardCredentialV1(credential)
+		if token != h.token {
+			h.writeUserPassStatus(rw, 0x01)
+			return "", "", fmt.Errorf("socks5: authentication failed")
+		}
+		h.writeUserPassStatus(rw, 0x00)
+		return platName, account, nil
+	}
 
 	if username != h.token {
-		rw.Write([]byte{0x01, 0x01})
+		h.writeUserPassStatus(rw, 0x01)
 		return "", "", fmt.Errorf("socks5: authentication failed")
 	}
 
-	var platName, account string
-	if h.authVer == config.AuthVersionV1 {
-		platName, account = parseForwardCredentialV1WhenAuthDisabled(password)
-	} else {
-		platName, account = parseLegacyPlatformAccountIdentity(password)
-	}
-
-	rw.Write([]byte{0x01, 0x00})
+	platName, account := parseLegacyPlatformAccountIdentity(password)
+	h.writeUserPassStatus(rw, 0x00)
 	return platName, account, nil
+}
+
+func (h *Socks5Handler) writeUserPassStatus(w io.Writer, status byte) {
+	_, _ = w.Write([]byte{0x01, status})
 }
 
 // readRequest reads a SOCKS5 CONNECT request and returns the target address.
