@@ -3,8 +3,9 @@ import type { PageResponse, Platform, PlatformCreateInput, PlatformUpdateInput }
 
 const basePath = "/api/v1/platforms";
 
-type ApiPlatform = Omit<Platform, "regex_filters" | "region_filters"> & {
+type ApiPlatform = Omit<Platform, "regex_filters" | "exclude_regex_filters" | "region_filters"> & {
   regex_filters?: string[] | null;
+  exclude_regex_filters?: string[] | null;
   region_filters?: string[] | null;
   routable_node_count?: number | null;
   reverse_proxy_miss_action?: Platform["reverse_proxy_miss_action"] | null;
@@ -24,6 +25,7 @@ function normalizePlatform(raw: ApiPlatform): Platform {
     ...raw,
     reverse_proxy_miss_action: parseMissAction(raw.reverse_proxy_miss_action),
     regex_filters: Array.isArray(raw.regex_filters) ? raw.regex_filters : [],
+    exclude_regex_filters: Array.isArray(raw.exclude_regex_filters) ? raw.exclude_regex_filters : [],
     region_filters: Array.isArray(raw.region_filters) ? raw.region_filters : [],
     routable_node_count: typeof raw.routable_node_count === "number" ? raw.routable_node_count : 0,
     reverse_proxy_empty_account_behavior:

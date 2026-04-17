@@ -14,6 +14,7 @@ func TestBuildFromModel_Success(t *testing.T) {
 		Name:                             "Platform-1",
 		StickyTTLNs:                      3600,
 		RegexFilters:                     []string{`^us-.*$`},
+		ExcludeRegexFilters:              []string{`relay`},
 		RegionFilters:                    []string{"us", "jp"},
 		ReverseProxyMissAction:           "REJECT",
 		ReverseProxyEmptyAccountBehavior: "FIXED_HEADER",
@@ -55,6 +56,9 @@ func TestBuildFromModel_Success(t *testing.T) {
 	if len(plat.RegexFilters) != 1 || !plat.RegexFilters[0].MatchString("us-node") {
 		t.Fatalf("regex filters not compiled as expected: %+v", plat.RegexFilters)
 	}
+	if len(plat.ExcludeRegexFilters) != 1 || !plat.ExcludeRegexFilters[0].MatchString("relay-node") {
+		t.Fatalf("exclude regex filters not compiled as expected: %+v", plat.ExcludeRegexFilters)
+	}
 	if len(plat.RegionFilters) != 2 || plat.RegionFilters[0] != "us" || plat.RegionFilters[1] != "jp" {
 		t.Fatalf("region filters mismatch: %+v", plat.RegionFilters)
 	}
@@ -69,6 +73,19 @@ func TestBuildFromModel_InvalidRegex(t *testing.T) {
 		t.Fatal("expected regex decode error")
 	}
 	if !strings.Contains(err.Error(), "regex_filters") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestBuildFromModel_InvalidExcludeRegex(t *testing.T) {
+	_, err := BuildFromModel(model.Platform{
+		ID:                  "plat-1",
+		ExcludeRegexFilters: []string{`(broken`},
+	})
+	if err == nil {
+		t.Fatal("expected exclude regex decode error")
+	}
+	if !strings.Contains(err.Error(), "exclude_regex_filters") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -180,6 +197,16 @@ func TestCompileRegexFilters_Invalid(t *testing.T) {
 		t.Fatal("expected compile error")
 	}
 	if !strings.Contains(err.Error(), "regex_filters[0]") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCompileExcludeRegexFilters_Invalid(t *testing.T) {
+	_, err := CompileExcludeRegexFilters([]string{"(broken"})
+	if err == nil {
+		t.Fatal("expected compile error")
+	}
+	if !strings.Contains(err.Error(), "exclude_regex_filters[0]") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

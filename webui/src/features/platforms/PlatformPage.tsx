@@ -175,7 +175,8 @@ export function PlatformPage() {
         <div className="platform-card-grid">
           {platforms.map((platform) => {
             const regionCount = platform.region_filters.length;
-            const regexCount = platform.regex_filters.length;
+            const includeRegexCount = platform.regex_filters.length;
+            const excludeRegexCount = platform.exclude_regex_filters.length;
             const stickyTTL = formatGoDuration(platform.sticky_ttl, t("默认"));
 
             return (
@@ -197,8 +198,12 @@ export function PlatformPage() {
                     <strong>{regionCount}</strong>
                   </span>
                   <span className="platform-fact">
-                    <span>{t("正则")}</span>
-                    <strong>{regexCount}</strong>
+                    <span>{t("包含正则")}</span>
+                    <strong>{includeRegexCount}</strong>
+                  </span>
+                  <span className="platform-fact">
+                    <span>{t("排除正则")}</span>
+                    <strong>{excludeRegexCount}</strong>
                   </span>
                   <span className="platform-fact">
                     <span>{t("租约时长")}</span>
@@ -321,11 +326,11 @@ export function PlatformPage() {
 
               <div className="field-group">
                 <label className="field-label field-label-with-info" htmlFor="create-regex">
-                  <span>{t("节点名正则过滤规则（可选）")}</span>
+                  <span>{t("节点标签包含正则规则（可选）")}</span>
                   <span
                     className="subscription-info-icon"
-                    title={t("满足所有正则表达式的节点才会被选择")}
-                    aria-label={t("满足所有正则表达式的节点才会被选择")}
+                    title={t("匹配对象为 订阅名/tag；节点需满足全部包含规则。")}
+                    aria-label={t("匹配对象为 订阅名/tag；节点需满足全部包含规则。")}
                     tabIndex={0}
                   >
                     <Info size={13} />
@@ -334,11 +339,34 @@ export function PlatformPage() {
                 <Textarea
                   id="create-regex"
                   rows={4}
-                  placeholder={t("每行一条，例如 .*专线.* 或 <订阅名>/.*")}
+                  placeholder={t("每行一条，例如 .*(家宽|住宅).* 或 <订阅名>/.*")}
                   {...createForm.register("regex_filters_text")}
                 />
                 <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
                   {t("技巧：<订阅名>/.* 可筛选来自该订阅的节点。")}
+                </p>
+              </div>
+
+              <div className="field-group">
+                <label className="field-label field-label-with-info" htmlFor="create-exclude-regex">
+                  <span>{t("节点标签排除正则规则（可选）")}</span>
+                  <span
+                    className="subscription-info-icon"
+                    title={t("匹配对象为 订阅名/tag；命中任一排除规则的节点会被剔除。")}
+                    aria-label={t("匹配对象为 订阅名/tag；命中任一排除规则的节点会被剔除。")}
+                    tabIndex={0}
+                  >
+                    <Info size={13} />
+                  </span>
+                </label>
+                <Textarea
+                  id="create-exclude-regex"
+                  rows={4}
+                  placeholder={t("每行一条，例如 .*专线.* 或 .*中转.*")}
+                  {...createForm.register("exclude_regex_filters_text")}
+                />
+                <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
+                  {t("技巧：排除规则命中任一条即剔除该候选标签。")}
                 </p>
               </div>
 

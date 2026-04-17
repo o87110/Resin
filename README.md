@@ -147,7 +147,7 @@ curl http://127.0.0.1:2260/my-token/./https/api.ipify.org
 
 ### Filter nodes
 
-If your service needs specific nodes (for example by region, subscription source, or name regex), use Resin's Platform feature.
+If your service needs specific nodes (for example by region, subscription source, or `SubscriptionName/tag` regex), use Resin's Platform feature.
 
 Open `http://127.0.0.1:2260/ui/platforms` and create a Platform. For example, to use only US and HK nodes, create `MyPlatform` and set region filters to:
 
@@ -155,6 +155,21 @@ Open `http://127.0.0.1:2260/ui/platforms` and create a Platform. For example, to
 us
 hk
 ```
+
+If you want to "include residential nodes but exclude relay/dedicated nodes", configure the platform like this:
+
+Include regex filters:
+```
+.*(Residential|Home Broadband).*
+```
+
+Exclude regex filters:
+```
+.*Relay.*
+.*Dedicated.*
+```
+
+Note: matching is evaluated against `SubscriptionName/tag`, not just the display name shown in the UI.
 
 For forward proxy, put Platform in proxy auth info:
 

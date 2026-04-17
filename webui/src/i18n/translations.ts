@@ -265,16 +265,26 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "优先空闲出口 IP": "Prefer idle egress IP",
   "租约保持时长": "Lease Sticky TTL",
   "租约保持时长（可选）": "Lease Sticky TTL (optional)",
-  "节点名正则过滤规则": "Node name regex filters",
-  "节点名正则过滤规则（可选）": "Node name regex filters (optional)",
+  "节点标签包含正则规则": "Node tag include regex filters",
+  "节点标签包含正则规则（可选）": "Node tag include regex filters (optional)",
+  "节点标签排除正则规则": "Node tag exclude regex filters",
+  "节点标签排除正则规则（可选）": "Node tag exclude regex filters (optional)",
   "地区过滤规则": "Region filters",
   "地区过滤规则（可选）": "Region filters (optional)",
+  "包含正则": "Include regex",
+  "排除正则": "Exclude regex",
   "每行一条": "One per line",
-  "每行一条，例如 .*专线.* 或 <订阅名>/.*": "One per line, e.g. .*Dedicated.* or <SubscriptionName>/.*",
+  "每行一条，例如 .*(家宽|住宅).* 或 <订阅名>/.*":
+    "One per line, e.g. .*(Residential|Home Broadband).* or <SubscriptionName>/.*",
+  "每行一条，例如 .*专线.* 或 .*中转.*": "One per line, e.g. .*Dedicated.* or .*Relay.*",
   "技巧：<订阅名>/.* 可筛选来自该订阅的节点。":
     "Tip: use <SubscriptionName>/.* to match nodes from that subscription.",
-  "满足所有正则表达式的节点才会被选择":
-    "Only nodes that satisfy all regex expressions will be selected.",
+  "技巧：排除规则命中任一条即剔除该候选标签。":
+    "Tip: any candidate tag matching an exclude regex will be removed.",
+  "匹配对象为 订阅名/tag；节点需满足全部包含规则。":
+    "Matching is evaluated against SubscriptionName/tag; a node must satisfy all include rules.",
+  "匹配对象为 订阅名/tag；命中任一排除规则的节点会被剔除。":
+    "Matching is evaluated against SubscriptionName/tag; any exclude rule match removes that node candidate.",
   "每行一条，如 hk / us": "One per line, e.g. hk / us",
   "每行一条，如 hk / us / !hk": "One per line, e.g. hk / us / !hk",
   "支持反选：以 ! 开头可排除地区（如 !hk）。可与正选混用，最终结果为“先正选再排除”。":

@@ -89,7 +89,7 @@ go version
 
 ### 4.2 第一次运行前，先构建前端
 
-因为后端会嵌入 `webui/dist`，如果这个目录不存在，`go run ./cmd/resin` 会失败。
+因为后端会嵌入 `webui/dist`，如果这个目录不存在，`go run -tags "with_quic with_wireguard with_grpc with_utls" ./cmd/resin` 也会失败。
 
 在项目根目录执行：
 
@@ -126,6 +126,8 @@ cd "E:\script\Resin"
 
 然后执行下面这整段命令：
 
+> 这里推荐直接带上 `with_quic with_wireguard with_grpc with_utls`。这样本地运行时可以兼容更多常见节点，尤其是 `VLESS + REALITY` 这类依赖 `uTLS` 的节点；否则你可能会看到类似 `rebuild with -tags with_utls` 的错误。
+
 ```powershell
 New-Item -ItemType Directory -Force -Path ".tmp\cache",".tmp\state",".tmp\log" | Out-Null
 $env:RESIN_AUTH_VERSION="V1"
@@ -137,7 +139,7 @@ $env:RESIN_SOCKS5_TIMEOUT="3s"
 $env:RESIN_CACHE_DIR=(Resolve-Path ".tmp\cache").Path
 $env:RESIN_STATE_DIR=(Resolve-Path ".tmp\state").Path
 $env:RESIN_LOG_DIR=(Resolve-Path ".tmp\log").Path
-go run ./cmd/resin
+go run -tags "with_quic with_wireguard with_grpc with_utls" ./cmd/resin
 ```
 
 ### 5.2 这些命令是什么意思
@@ -156,8 +158,8 @@ go run ./cmd/resin
   服务端口
 - `$env:RESIN_SOCKS5_TIMEOUT="3s"`
   SOCKS 握手超时
-- `go run ./cmd/resin`
-  直接运行项目主程序
+- `go run -tags "with_quic with_wireguard with_grpc with_utls" ./cmd/resin`
+  带常用可选能力运行项目主程序，避免 `uTLS` / `REALITY` 之类节点因为编译标签缺失而启动失败
 
 ### 5.3 这些环境变量是不是永久的
 
@@ -362,7 +364,7 @@ cd "E:\script\Resin"
 ### 10.3 运行后端
 
 ```powershell
-go run ./cmd/resin
+go run -tags "with_quic with_wireguard with_grpc with_utls" ./cmd/resin
 ```
 
 ### 10.4 测试 HTTP 代理
@@ -540,7 +542,7 @@ $env:RESIN_SOCKS5_TIMEOUT="3s"
 $env:RESIN_CACHE_DIR=(Resolve-Path ".tmp\cache").Path
 $env:RESIN_STATE_DIR=(Resolve-Path ".tmp\state").Path
 $env:RESIN_LOG_DIR=(Resolve-Path ".tmp\log").Path
-go run ./cmd/resin
+go run -tags "with_quic with_wireguard with_grpc with_utls" ./cmd/resin
 ```
 
 ### 第三步：导入节点
@@ -585,4 +587,3 @@ curl.exe -x socks5h://127.0.0.1:2260 --proxy-user "Default.user_jerry:my-token" 
 
 - 本地实现完成
 - 本地功能验证通过
-

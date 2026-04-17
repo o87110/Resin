@@ -484,6 +484,82 @@ func TestCreatePlatform_BuildsRoutableViewBeforePublish(t *testing.T) {
 	if !plat.View().Contains(hash) {
 		t.Fatalf("new platform view should contain seeded hash %s", hash.Hex())
 	}
+	if len(created.ExcludeRegexFilters) != 0 {
+		t.Fatalf("new platform exclude_regex_filters = %v, want empty", created.ExcludeRegexFilters)
+	}
+}
+
+func TestCreatePlatform_ExcludeRegexFiltersApplyToRoutableView(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = closer.Close()
+	})
+
+	subMgr := topology.NewSubscriptionManager()
+	sub := subscription.NewSubscription("sub-1", "sub", "https://example.com/sub", true, false)
+	subMgr.Register(sub)
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	raw := []byte(`{"type":"ss","server":"1.1.1.1","port":443}`)
+	hash := node.HashFromRawOptions(raw)
+	sub.ManagedNodes().StoreNode(hash, subscription.ManagedNode{Tags: []string{"relay"}})
+	entry := node.NewNodeEntry(hash, raw, time.Now(), 16)
+	entry.AddSubscriptionID(sub.ID)
+	entry.SetEgressIP(netip.MustParseAddr("1.2.3.4"))
+	entry.LatencyTable.LoadEntry("cloudflare.com", node.DomainLatencyStats{
+		Ewma:        50 * time.Millisecond,
+		LastUpdated: time.Now(),
+	})
+	ob := testutil.NewNoopOutbound()
+	entry.Outbound.Store(&ob)
+	pool.LoadNodeFromBootstrap(entry)
+
+	runtimeCfg := &atomic.Pointer[config.RuntimeConfig]{}
+	runtimeCfg.Store(config.NewDefaultRuntimeConfig())
+
+	cp := &ControlPlaneService{
+		Engine:     engine,
+		Pool:       pool,
+		SubMgr:     subMgr,
+		RuntimeCfg: runtimeCfg,
+		EnvCfg: &config.EnvConfig{
+			DefaultPlatformStickyTTL:              30 * time.Minute,
+			DefaultPlatformRegexFilters:           []string{},
+			DefaultPlatformRegionFilters:          []string{},
+			DefaultPlatformReverseProxyMissAction: "TREAT_AS_EMPTY",
+			DefaultPlatformAllocationPolicy:       "BALANCED",
+		},
+	}
+
+	name := "exclude-platform"
+	created, err := cp.CreatePlatform(CreatePlatformRequest{
+		Name:                &name,
+		ExcludeRegexFilters: []string{"relay"},
+	})
+	if err != nil {
+		t.Fatalf("CreatePlatform: %v", err)
+	}
+
+	plat, ok := pool.GetPlatform(created.ID)
+	if !ok {
+		t.Fatalf("platform %s was not registered in pool", created.ID)
+	}
+	if got := plat.View().Size(); got != 0 {
+		t.Fatalf("new platform view size = %d, want 0", got)
+	}
 }
 
 func TestCreatePlatform_RejectsReservedAPIName(t *testing.T) {
@@ -878,6 +954,7 @@ func TestDeletePlatform_DoesNotDecodeCorruptPersistedFiltersJSON(t *testing.T) {
 		platformRow.Name,
 		nil,
 		nil,
+		nil,
 		platformRow.StickyTTLNs,
 		platformRow.ReverseProxyMissAction,
 		string(platform.ReverseProxyEmptyAccountBehaviorAccountHeaderRule),
@@ -940,6 +1017,7 @@ func TestResetPlatformToDefault_SupportsBuiltInDefaultPlatform(t *testing.T) {
 		defaultRow.Name,
 		nil,
 		nil,
+		nil,
 		defaultRow.StickyTTLNs,
 		defaultRow.ReverseProxyMissAction,
 		string(platform.ReverseProxyEmptyAccountBehaviorAccountHeaderRule),
@@ -975,6 +1053,9 @@ func TestResetPlatformToDefault_SupportsBuiltInDefaultPlatform(t *testing.T) {
 	if !reflect.DeepEqual(resp.RegexFilters, []string{"^prod-"}) {
 		t.Fatalf("response regex_filters = %v, want %v", resp.RegexFilters, []string{"^prod-"})
 	}
+	if len(resp.ExcludeRegexFilters) != 0 {
+		t.Fatalf("response exclude_regex_filters = %v, want empty", resp.ExcludeRegexFilters)
+	}
 	if !reflect.DeepEqual(resp.RegionFilters, []string{"jp"}) {
 		t.Fatalf("response region_filters = %v, want %v", resp.RegionFilters, []string{"jp"})
 	}
@@ -998,6 +1079,9 @@ func TestResetPlatformToDefault_SupportsBuiltInDefaultPlatform(t *testing.T) {
 	if !reflect.DeepEqual(stored.RegexFilters, []string{"^prod-"}) {
 		t.Fatalf("stored regex_filters = %v, want %v", stored.RegexFilters, []string{"^prod-"})
 	}
+	if len(stored.ExcludeRegexFilters) != 0 {
+		t.Fatalf("stored exclude_regex_filters = %v, want empty", stored.ExcludeRegexFilters)
+	}
 	if !reflect.DeepEqual(stored.RegionFilters, []string{"jp"}) {
 		t.Fatalf("stored region_filters = %v, want %v", stored.RegionFilters, []string{"jp"})
 	}
@@ -1020,6 +1104,9 @@ func TestResetPlatformToDefault_SupportsBuiltInDefaultPlatform(t *testing.T) {
 	}
 	if len(plat.RegexFilters) != 1 || plat.RegexFilters[0].String() != "^prod-" {
 		t.Fatalf("pool regex_filters = %v, want [%q]", plat.RegexFilters, "^prod-")
+	}
+	if len(plat.ExcludeRegexFilters) != 0 {
+		t.Fatalf("pool exclude_regex_filters = %v, want empty", plat.ExcludeRegexFilters)
 	}
 	if !reflect.DeepEqual(plat.RegionFilters, []string{"jp"}) {
 		t.Fatalf("pool region_filters = %v, want %v", plat.RegionFilters, []string{"jp"})
@@ -1081,6 +1168,7 @@ func TestResetPlatformToDefault_DoesNotDecodeCorruptPersistedFiltersJSON(t *test
 		platformRow.Name,
 		nil,
 		nil,
+		nil,
 		platformRow.StickyTTLNs,
 		platformRow.ReverseProxyMissAction,
 		string(platform.ReverseProxyEmptyAccountBehaviorAccountHeaderRule),
@@ -1113,6 +1201,9 @@ func TestResetPlatformToDefault_DoesNotDecodeCorruptPersistedFiltersJSON(t *test
 	if !reflect.DeepEqual(resp.RegexFilters, []string{"^prod-"}) {
 		t.Fatalf("response regex_filters = %v, want %v", resp.RegexFilters, []string{"^prod-"})
 	}
+	if len(resp.ExcludeRegexFilters) != 0 {
+		t.Fatalf("response exclude_regex_filters = %v, want empty", resp.ExcludeRegexFilters)
+	}
 	if !reflect.DeepEqual(resp.RegionFilters, []string{"jp"}) {
 		t.Fatalf("response region_filters = %v, want %v", resp.RegionFilters, []string{"jp"})
 	}
@@ -1130,6 +1221,9 @@ func TestResetPlatformToDefault_DoesNotDecodeCorruptPersistedFiltersJSON(t *test
 	storedResp := platformToResponse(*stored)
 	if !reflect.DeepEqual(storedResp.RegexFilters, []string{"^prod-"}) {
 		t.Fatalf("stored regex_filters = %v, want %v", storedResp.RegexFilters, []string{"^prod-"})
+	}
+	if len(storedResp.ExcludeRegexFilters) != 0 {
+		t.Fatalf("stored exclude_regex_filters = %v, want empty", storedResp.ExcludeRegexFilters)
 	}
 	if !reflect.DeepEqual(storedResp.RegionFilters, []string{"jp"}) {
 		t.Fatalf("stored region_filters = %v, want %v", storedResp.RegionFilters, []string{"jp"})

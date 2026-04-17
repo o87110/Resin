@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"net/url"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1038,6 +1039,106 @@ func TestAPIContract_SystemConfigPatchSemantics(t *testing.T) {
 			}
 			assertErrorCode(t, r, "INVALID_ARGUMENT")
 		})
+	}
+}
+
+func TestAPIContract_PlatformExcludeRegexFilters(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("sub-preview", "Provider", "https://example.com/sub-preview", true, false)
+	cp.SubMgr.Register(sub)
+
+	relayRaw := []byte(`{"type":"ss","server":"1.1.1.1","port":443}`)
+	relayHash := node.HashFromRawOptions(relayRaw)
+	cp.Pool.AddNodeFromSub(relayHash, relayRaw, sub.ID)
+	sub.ManagedNodes().StoreNode(relayHash, subscription.ManagedNode{Tags: []string{"residential-relay"}})
+
+	directRaw := []byte(`{"type":"ss","server":"2.2.2.2","port":443}`)
+	directHash := node.HashFromRawOptions(directRaw)
+	cp.Pool.AddNodeFromSub(directHash, directRaw, sub.ID)
+	sub.ManagedNodes().StoreNode(directHash, subscription.ManagedNode{Tags: []string{"residential-direct"}})
+
+	createRec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms", map[string]any{
+		"name":                  "exclude-regex-platform",
+		"regex_filters":         []string{"residential"},
+		"exclude_regex_filters": []string{"relay"},
+	}, true)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create platform status: got %d, want %d, body=%s", createRec.Code, http.StatusCreated, createRec.Body.String())
+	}
+	createBody := decodeJSONMap(t, createRec)
+	platformID, _ := createBody["id"].(string)
+	if platformID == "" {
+		t.Fatalf("create platform missing id: body=%s", createRec.Body.String())
+	}
+	if !reflect.DeepEqual(createBody["exclude_regex_filters"], []any{"relay"}) {
+		t.Fatalf("create exclude_regex_filters = %v, want [relay]", createBody["exclude_regex_filters"])
+	}
+
+	getRec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/platforms/"+platformID, nil, true)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get platform status: got %d, want %d, body=%s", getRec.Code, http.StatusOK, getRec.Body.String())
+	}
+	getBody := decodeJSONMap(t, getRec)
+	if !reflect.DeepEqual(getBody["exclude_regex_filters"], []any{"relay"}) {
+		t.Fatalf("get exclude_regex_filters = %v, want [relay]", getBody["exclude_regex_filters"])
+	}
+
+	listRec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/platforms?keyword=exclude-regex-platform", nil, true)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list platforms status: got %d, want %d, body=%s", listRec.Code, http.StatusOK, listRec.Body.String())
+	}
+	listBody := decodeJSONMap(t, listRec)
+	items, ok := listBody["items"].([]any)
+	if !ok {
+		t.Fatalf("list items type: got %T", listBody["items"])
+	}
+	if len(items) != 1 {
+		t.Fatalf("list items len = %d, want 1, body=%s", len(items), listRec.Body.String())
+	}
+	item, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("list item type: got %T", items[0])
+	}
+	if !reflect.DeepEqual(item["exclude_regex_filters"], []any{"relay"}) {
+		t.Fatalf("list exclude_regex_filters = %v, want [relay]", item["exclude_regex_filters"])
+	}
+
+	patchRec := doJSONRequest(t, srv, http.MethodPatch, "/api/v1/platforms/"+platformID, map[string]any{
+		"exclude_regex_filters": []string{"relay", "dedicated"},
+	}, true)
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("patch platform status: got %d, want %d, body=%s", patchRec.Code, http.StatusOK, patchRec.Body.String())
+	}
+	patchBody := decodeJSONMap(t, patchRec)
+	if !reflect.DeepEqual(patchBody["exclude_regex_filters"], []any{"relay", "dedicated"}) {
+		t.Fatalf("patch exclude_regex_filters = %v, want [relay dedicated]", patchBody["exclude_regex_filters"])
+	}
+
+	previewRec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms/preview-filter", map[string]any{
+		"platform_spec": map[string]any{
+			"regex_filters":         []string{"residential"},
+			"exclude_regex_filters": []string{"relay"},
+			"region_filters":        []string{},
+		},
+	}, true)
+	if previewRec.Code != http.StatusOK {
+		t.Fatalf("preview-filter status: got %d, want %d, body=%s", previewRec.Code, http.StatusOK, previewRec.Body.String())
+	}
+	previewBody := decodeJSONMap(t, previewRec)
+	previewItems, ok := previewBody["items"].([]any)
+	if !ok {
+		t.Fatalf("preview items type: got %T", previewBody["items"])
+	}
+	if len(previewItems) != 1 {
+		t.Fatalf("preview items len = %d, want 1, body=%s", len(previewItems), previewRec.Body.String())
+	}
+	previewItem, ok := previewItems[0].(map[string]any)
+	if !ok {
+		t.Fatalf("preview item type: got %T", previewItems[0])
+	}
+	if previewItem["node_hash"] != directHash.Hex() {
+		t.Fatalf("preview node_hash = %v, want %q", previewItem["node_hash"], directHash.Hex())
 	}
 }
 

@@ -168,6 +168,77 @@ func TestNodeEntry_MatchRegexs_MultiSub(t *testing.T) {
 	}
 }
 
+func TestNodeEntry_MatchTagFilters_ExcludeOnly(t *testing.T) {
+	h := HashFromRawOptions([]byte(`{"type":"ss"}`))
+	e := NewNodeEntry(h, nil, time.Now(), 0)
+	e.AddSubscriptionID("sub-1")
+
+	lookup := func(subID string, hash Hash) (string, bool, []string, bool) {
+		return "Provider", true, []string{"relay", "residential"}, true
+	}
+
+	excludeRegexes := []*regexp.Regexp{regexp.MustCompile("relay")}
+	if !e.MatchTagFilters(nil, excludeRegexes, lookup) {
+		t.Fatal("candidate not matching exclude regex should keep node eligible")
+	}
+
+	excludeRegexes = []*regexp.Regexp{
+		regexp.MustCompile("relay"),
+		regexp.MustCompile("residential"),
+	}
+	if e.MatchTagFilters(nil, excludeRegexes, lookup) {
+		t.Fatal("all candidates should be excluded")
+	}
+}
+
+func TestNodeEntry_MatchTagFilters_IncludeAndExclude(t *testing.T) {
+	h := HashFromRawOptions([]byte(`{"type":"ss"}`))
+	e := NewNodeEntry(h, nil, time.Now(), 0)
+	e.AddSubscriptionID("sub-1")
+
+	lookup := func(subID string, hash Hash) (string, bool, []string, bool) {
+		return "Provider", true, []string{"home-relay", "home-clean"}, true
+	}
+
+	includeRegexes := []*regexp.Regexp{regexp.MustCompile("home")}
+	excludeRegexes := []*regexp.Regexp{regexp.MustCompile("relay")}
+	if !e.MatchTagFilters(includeRegexes, excludeRegexes, lookup) {
+		t.Fatal("home-clean should satisfy include regex and avoid exclude regex")
+	}
+
+	excludeRegexes = []*regexp.Regexp{
+		regexp.MustCompile("relay"),
+		regexp.MustCompile("clean"),
+	}
+	if e.MatchTagFilters(includeRegexes, excludeRegexes, lookup) {
+		t.Fatal("exclude regex should win when every included candidate is excluded")
+	}
+}
+
+func TestNodeEntry_MatchTagFilters_MultiSubCandidatePasses(t *testing.T) {
+	h := HashFromRawOptions([]byte(`{"type":"ss"}`))
+	e := NewNodeEntry(h, nil, time.Now(), 0)
+	e.AddSubscriptionID("sub-1")
+	e.AddSubscriptionID("sub-2")
+
+	lookup := func(subID string, hash Hash) (string, bool, []string, bool) {
+		switch subID {
+		case "sub-1":
+			return "Provider-A", true, []string{"residential-relay"}, true
+		case "sub-2":
+			return "Provider-B", true, []string{"residential-direct"}, true
+		default:
+			return "", false, nil, false
+		}
+	}
+
+	includeRegexes := []*regexp.Regexp{regexp.MustCompile("residential")}
+	excludeRegexes := []*regexp.Regexp{regexp.MustCompile("relay")}
+	if !e.MatchTagFilters(includeRegexes, excludeRegexes, lookup) {
+		t.Fatal("matching candidate from a second subscription should keep node eligible")
+	}
+}
+
 func TestNodeEntry_HasEnabledSubscription(t *testing.T) {
 	h := HashFromRawOptions([]byte(`{"type":"ss"}`))
 	e := NewNodeEntry(h, nil, time.Now(), 0)

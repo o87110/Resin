@@ -23,6 +23,7 @@ const (
 	stateVersionAddEmptyAccountBehavior = 2
 	stateVersionAddFixedAccountHeader   = 3
 	stateVersionNormalizeMissAction     = 4
+	stateVersionAddExcludeRegexFilters  = 5
 	stateLegacyBaselineVersion          = stateVersionAddFixedAccountHeader
 )
 
@@ -104,8 +105,14 @@ func prepareLegacyStateBaseline(db *sql.DB, driver migratedb.Driver) error {
 	if err != nil {
 		return err
 	}
+	hasExcludeRegexFilters, err := hasTableColumn(db, "platforms", "exclude_regex_filters_json")
+	if err != nil {
+		return err
+	}
 
 	switch {
+	case hasEmptyBehavior && hasFixedHeader && hasExcludeRegexFilters:
+		return setMigrationVersion(driver, stateVersionAddExcludeRegexFilters)
 	case hasEmptyBehavior && hasFixedHeader:
 		return setMigrationVersion(driver, stateLegacyBaselineVersion)
 	case hasEmptyBehavior && !hasFixedHeader:

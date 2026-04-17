@@ -107,15 +107,25 @@ func (e *NodeEntry) SubscriptionCount() int {
 	return len(e.subscriptionIDs)
 }
 
-// MatchRegexs tests whether the node matches ALL given regex filters.
-// A match means any tag from any enabled subscription satisfies all regexes.
-// Tags are tested in the format "<subscriptionName>/<tag>".
-// For an empty regex list:
-//   - if subLookup is nil, it matches everything (compatibility fallback);
-//   - otherwise, it matches only when at least one enabled subscription exists.
-func (e *NodeEntry) MatchRegexs(regexes []*regexp.Regexp, subLookup SubLookupFunc) bool {
+// MatchTagFilters tests whether the node matches the given include/exclude tag
+// regex filters. Tags are tested in the format "<subscriptionName>/<tag>".
+//
+// Match semantics:
+//   - include regexes use AND semantics: one candidate must satisfy every regex
+//   - exclude regexes use OR semantics: a candidate is rejected if any regex matches
+//   - the node matches if any enabled subscription tag candidate passes both checks
+//
+// Compatibility fallback:
+//   - if subLookup is nil, only an entirely empty filter set matches
+//   - if both include/exclude are empty and subLookup is provided, any enabled
+//     subscription matches (same behavior as the legacy include-only helper)
+func (e *NodeEntry) MatchTagFilters(
+	includeRegexes []*regexp.Regexp,
+	excludeRegexes []*regexp.Regexp,
+	subLookup SubLookupFunc,
+) bool {
 	if subLookup == nil {
-		return len(regexes) == 0
+		return len(includeRegexes) == 0 && len(excludeRegexes) == 0
 	}
 
 	e.mu.RLock()
@@ -123,7 +133,7 @@ func (e *NodeEntry) MatchRegexs(regexes []*regexp.Regexp, subLookup SubLookupFun
 	copy(subs, e.subscriptionIDs)
 	e.mu.RUnlock()
 
-	if len(regexes) == 0 {
+	if len(includeRegexes) == 0 && len(excludeRegexes) == 0 {
 		for _, subID := range subs {
 			_, enabled, _, ok := subLookup(subID, e.Hash)
 			if ok && enabled {
@@ -145,12 +155,17 @@ func (e *NodeEntry) MatchRegexs(regexes []*regexp.Regexp, subLookup SubLookupFun
 		}
 		for _, tag := range tags {
 			candidate := name + "/" + tag
-			if matchesAll(candidate, regexes) {
+			if matchesAll(candidate, includeRegexes) && !matchesAny(candidate, excludeRegexes) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// MatchRegexs is the legacy include-only tag filter helper.
+func (e *NodeEntry) MatchRegexs(regexes []*regexp.Regexp, subLookup SubLookupFunc) bool {
+	return e.MatchTagFilters(regexes, nil, subLookup)
 }
 
 // HasEnabledSubscription reports whether the node currently has at least one
@@ -192,6 +207,15 @@ func matchesAll(s string, regexes []*regexp.Regexp) bool {
 		}
 	}
 	return true
+}
+
+func matchesAny(s string, regexes []*regexp.Regexp) bool {
+	for _, re := range regexes {
+		if re.MatchString(s) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Condition helpers for platform filtering ---
