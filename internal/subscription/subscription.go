@@ -131,6 +131,9 @@ type Subscription struct {
 	LastCheckedNs atomic.Int64
 	LastUpdatedNs atomic.Int64
 	LastError     atomic.Pointer[string]
+	// Refresh attempt sequencing for scheduler stale-guard.
+	refreshAttemptSeq     atomic.Int64
+	lastAppliedRefreshSeq atomic.Int64
 
 	// managedNodes is the subscription's node view: Hash → ManagedNode.
 	// Swapped atomically on subscription update.
@@ -165,6 +168,21 @@ func (s *Subscription) SetLastError(err string) { s.LastError.Store(&err) }
 
 // GetLastError atomically loads the last error string.
 func (s *Subscription) GetLastError() string { return *s.LastError.Load() }
+
+// BeginRefreshAttempt returns a monotonically increasing refresh attempt sequence.
+func (s *Subscription) BeginRefreshAttempt() int64 {
+	return s.refreshAttemptSeq.Add(1)
+}
+
+// LastAppliedRefreshAttempt returns the most recently applied refresh attempt sequence.
+func (s *Subscription) LastAppliedRefreshAttempt() int64 {
+	return s.lastAppliedRefreshSeq.Load()
+}
+
+// MarkRefreshAttemptApplied records the refresh attempt sequence that last mutated state.
+func (s *Subscription) MarkRefreshAttemptApplied(seq int64) {
+	s.lastAppliedRefreshSeq.Store(seq)
+}
 
 // WithOpLock runs fn under the subscription operation lock.
 func (s *Subscription) WithOpLock(fn func()) {

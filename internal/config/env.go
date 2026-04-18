@@ -58,7 +58,8 @@ type EnvConfig struct {
 	ProxyToken  string
 
 	// SOCKS inbound
-	Socks5Timeout time.Duration
+	Socks5Timeout       time.Duration
+	AllowInsecureSOCKS4 bool
 
 	// Metrics
 	MetricThroughputIntervalSeconds   int
@@ -134,6 +135,7 @@ func LoadEnvConfig() (*EnvConfig, error) {
 
 	// --- SOCKS inbound ---
 	cfg.Socks5Timeout = envDuration("RESIN_SOCKS5_TIMEOUT", 3*time.Second, &errs)
+	cfg.AllowInsecureSOCKS4 = envBool("RESIN_ALLOW_INSECURE_SOCKS4", false, &errs)
 
 	// --- Metrics ---
 	cfg.MetricThroughputIntervalSeconds = envInt("RESIN_METRIC_THROUGHPUT_INTERVAL_SECONDS", 2, &errs)
@@ -368,6 +370,19 @@ func envDuration(key string, defaultVal time.Duration, errs *[]string) time.Dura
 		return defaultVal
 	}
 	return d
+}
+
+func envBool(key string, defaultVal bool, errs *[]string) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return defaultVal
+	}
+	parsed, err := strconv.ParseBool(v)
+	if err != nil {
+		*errs = append(*errs, fmt.Sprintf("%s: invalid boolean %q", key, v))
+		return defaultVal
+	}
+	return parsed
 }
 
 func envStringSlice(key string, defaultVal []string, errs *[]string) []string {

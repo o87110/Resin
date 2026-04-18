@@ -235,6 +235,9 @@ func (r *Router) createOrAbortStickyLease(
 		lease, op := abortLeaseCreate(previous, hadPreviousLease)
 		return lease, op, RouteResult{}, err
 	}
+	if hadPreviousLease && newLease.ExpiryNs <= previous.ExpiryNs {
+		newLease.ExpiryNs = previous.ExpiryNs + 1
+	}
 
 	r.cleanupPreviousLease(state, previous, hadPreviousLease, invalidation, plat.ID, account)
 	state.IPLoadStats.Inc(newLease.EgressIP)
@@ -254,6 +257,10 @@ func (r *Router) tryLeaseHit(
 	current Lease,
 	nowNs int64,
 ) (Lease, RouteResult, bool) {
+	// Sticky routing precedence is:
+	// 1. Reuse the existing lease when the current node is still valid.
+	// 2. If that fails, try same-egress-IP rotation from the full platform view.
+	// 3. Only when both fail, create a new lease; priority tiers apply there.
 	entry, ok := r.pool.GetEntry(current.NodeHash)
 	if !ok || !plat.View().Contains(current.NodeHash) || entry.GetEgressIP() != current.EgressIP {
 		return Lease{}, RouteResult{}, false

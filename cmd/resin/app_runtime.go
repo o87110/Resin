@@ -54,6 +54,9 @@ func run() error {
 	if warning := authVersionStartupWarning(envCfg.AuthVersion); warning != "" {
 		startupWarnf("%s", warning)
 	}
+	if warning := insecureSOCKS4StartupWarning(envCfg.AllowInsecureSOCKS4, envCfg.ProxyToken); warning != "" {
+		startupWarnf("%s", warning)
+	}
 
 	engine, dbCloser, err := state.PersistenceBootstrap(envCfg.StateDir, envCfg.CacheDir)
 	if err != nil {
@@ -445,14 +448,15 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 	a.inboundSrv = &http.Server{Handler: inboundHandler}
 
 	a.socks5Srv = proxy.NewSocks5Handler(proxy.Socks5HandlerConfig{
-		ProxyToken:  a.envCfg.ProxyToken,
-		AuthVersion: string(a.envCfg.AuthVersion),
-		Router:      a.topoRuntime.router,
-		Pool:        a.topoRuntime.pool,
-		Health:      a.topoRuntime.pool,
-		Events:      proxyEvents,
-		MetricsSink: a.metricsManager,
-		Timeout:     a.envCfg.Socks5Timeout,
+		ProxyToken:          a.envCfg.ProxyToken,
+		AuthVersion:         string(a.envCfg.AuthVersion),
+		Router:              a.topoRuntime.router,
+		Pool:                a.topoRuntime.pool,
+		Health:              a.topoRuntime.pool,
+		Events:              proxyEvents,
+		MetricsSink:         a.metricsManager,
+		Timeout:             a.envCfg.Socks5Timeout,
+		AllowInsecureSOCKS4: a.envCfg.AllowInsecureSOCKS4,
 	})
 
 	return nil
@@ -499,8 +503,9 @@ func (a *resinApp) startServers() <-chan error {
 
 	go func() {
 		log.Printf(
-			"Resin server starting on %s (HTTP + SOCKS4/SOCKS5)",
+			"Resin server starting on %s (%s)",
 			formatListenURL(a.envCfg.ListenAddress, a.envCfg.ResinPort),
+			socksSupportLabel(a.envCfg.AllowInsecureSOCKS4, a.envCfg.ProxyToken),
 		)
 		reportServerErr("resin server", a.sniffAndServe(a.inboundLn))
 	}()
@@ -509,7 +514,8 @@ func (a *resinApp) startServers() <-chan error {
 }
 
 // sniffAndServe accepts connections, peeks the first byte, and routes:
-// 0x05 -> SOCKS5 handler (in goroutine), otherwise -> HTTP server.
+// 0x05 -> SOCKS5 handler, 0x04 -> SOCKS4 handler, otherwise -> HTTP server.
+// The SOCKS4 handler may immediately reject based on its internal safety checks.
 // Uses a channel-based listener to feed HTTP connections to http.Server.Serve.
 func (a *resinApp) sniffAndServe(ln net.Listener) error {
 	// Channel listener for HTTP connections.
@@ -626,6 +632,20 @@ func formatListenAddress(listenAddress string, port int) string {
 
 func formatListenURL(listenAddress string, port int) string {
 	return "http://" + formatListenAddress(listenAddress, port)
+}
+
+func socksSupportLabel(allowInsecureSOCKS4 bool, proxyToken string) string {
+	if allowInsecureSOCKS4 && proxyToken == "" {
+		return "HTTP + SOCKS5 + SOCKS4 (unsafe)"
+	}
+	return "HTTP + SOCKS5"
+}
+
+func insecureSOCKS4StartupWarning(allowInsecureSOCKS4 bool, proxyToken string) string {
+	if allowInsecureSOCKS4 && proxyToken != "" {
+		return "RESIN_ALLOW_INSECURE_SOCKS4=true is ignored when RESIN_PROXY_TOKEN is non-empty; SOCKS4 remains disabled by handler safety checks."
+	}
+	return ""
 }
 
 func (a *resinApp) shutdown(ctx context.Context) {

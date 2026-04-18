@@ -113,6 +113,7 @@ services:
 启动 Resin 服务后，给你的应用程序接入 `http://127.0.0.1:2260` 代理即可。  
 同一个 `RESIN_PORT` 同时支持 HTTP Proxy 与 SOCKS5；如果你的客户端更适合 SOCKS5，只需要把代理地址改成 `socks5://127.0.0.1:2260` 或 `socks5h://127.0.0.1:2260`。
 如果你不想设置代理密码，请将环境变量显式设为空字符串：`RESIN_PROXY_TOKEN=""`（变量必须定义）。此时可直接接入 `http://127.0.0.1:2260`。下面是使用 curl 的一个例子：
+SOCKS4 默认关闭；仅当 `RESIN_ALLOW_INSECURE_SOCKS4=true` 且 `RESIN_PROXY_TOKEN=""` 时才允许使用。
 
 
 ```bash
@@ -183,7 +184,7 @@ curl http://127.0.0.1:2260/my-token/MyPlatform/https/api.ipify.org
 
 ### 🎯 核心概念：平台 (Platform) 与 账号 (Account)
 - **平台 (Platform)**：节点的隔离池。你可以通过规则筛选节点（例如只使用“美国”节点）组建成一个专有池。系统默认存在一个装载所有可用节点的 `Default` 平台。
-- **账号 (Account)**：业务侧的唯一标识（如 `Tom` 或 `user_1`）。携带特定 Account 的请求，Resin 会优先为其分配稳定的出口节点；当节点不可用时，会重试并优先切换到同 IP 节点，以降低业务侧适配成本。
+- **账号 (Account)**：业务侧的唯一标识（如 `Tom` 或 `user_1`）。携带特定 Account 的请求，Resin 会优先为其分配稳定的出口节点；当节点不可用时，会重试并优先切换到同 IP 节点，以降低业务侧适配成本。优先级层只影响新建选点，不会打断已有粘性租约，也不会覆盖同 IP 优先切换的顶层规则。
 
 ### 粘性代理接入格式
 

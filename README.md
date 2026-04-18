@@ -118,6 +118,7 @@ If you just need a high-performance, large-capacity proxy pool with automatic he
 Once Resin is running, point your app to `http://127.0.0.1:2260`.
 The same `RESIN_PORT` accepts both HTTP Proxy and SOCKS5. If your client prefers SOCKS5, switch the proxy URL to `socks5://127.0.0.1:2260` or `socks5h://127.0.0.1:2260`.
 If you do not want a proxy password, explicitly set `RESIN_PROXY_TOKEN=""` (the variable must still be defined). Then connect directly to `http://127.0.0.1:2260`.
+SOCKS4 is disabled by default. It is only allowed when `RESIN_ALLOW_INSECURE_SOCKS4=true` and `RESIN_PROXY_TOKEN=""`.
 
 Example with curl:
 
@@ -194,7 +195,7 @@ First, understand two core concepts:
 ### 🎯 Core Concepts: Platform and Account
 
 - **Platform**: An isolated node pool. You can build it with filters (for example, only US nodes). Resin provides a default `Default` platform containing all available nodes.
-- **Account**: A unique business identity (for example `Tom` or `user_1`). For requests carrying an Account, Resin anchors traffic to a dedicated high-quality outbound node. If that node fails, Resin retries seamlessly and switches to another node with the same IP.
+- **Account**: A unique business identity (for example `Tom` or `user_1`). For requests carrying an Account, Resin anchors traffic to a dedicated high-quality outbound node. If that node fails, Resin retries seamlessly and switches to another node with the same IP. Priority tiers only affect new route selection; they do not break an existing sticky lease or override same-egress-IP failover.
 
 ### Sticky proxy access formats
 

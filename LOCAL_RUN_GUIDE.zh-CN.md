@@ -176,7 +176,7 @@ go run -tags "with_quic with_wireguard with_grpc with_utls" ./cmd/resin
 正常启动后，日志里通常会出现类似信息：
 
 ```text
-Resin server starting on http://127.0.0.1:2260 (HTTP + SOCKS4/SOCKS5)
+Resin server starting on http://127.0.0.1:2260 (HTTP + SOCKS5)
 ```
 
 这表示：
@@ -184,6 +184,7 @@ Resin server starting on http://127.0.0.1:2260 (HTTP + SOCKS4/SOCKS5)
 - Resin 已经启动
 - 当前端口是 `2260`
 - HTTP 和 SOCKS5 都已经挂在这个端口上
+- SOCKS4 默认关闭；仅当 `RESIN_ALLOW_INSECURE_SOCKS4=true` 且 `RESIN_PROXY_TOKEN=""` 时才允许使用
 
 ### 5.5 启动后这个窗口要不要关
 
@@ -484,7 +485,7 @@ curl.exe -x socks5h://127.0.0.1:2260 --proxy-user ":my-token" https://api.ipify.
 
 如果仍然不通，优先检查：
 
-- Resin 启动日志里是否有 `HTTP + SOCKS4/SOCKS5`
+- Resin 启动日志里是否有 `HTTP + SOCKS5`
 - 当前端口是否仍然是 `2260`
 - 是否已经导入有效节点
 

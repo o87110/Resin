@@ -1,8 +1,10 @@
 package service
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 	"time"
@@ -113,8 +115,13 @@ func (p mergePatch) optionalPriorityTierSlice(field string) ([]model.PlatformPri
 		if err != nil {
 			return nil, true, invalidArg(fmt.Sprintf("%s[%d]: invalid value", field, i))
 		}
-		if err := json.Unmarshal(data, &value[i]); err != nil {
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&value[i]); err != nil {
 			return nil, true, invalidArg(fmt.Sprintf("%s[%d]: %s", field, i, err.Error()))
+		}
+		if err := dec.Decode(&struct{}{}); err != io.EOF {
+			return nil, true, invalidArg(fmt.Sprintf("%s[%d]: must contain a single JSON value", field, i))
 		}
 	}
 	return value, true, nil

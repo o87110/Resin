@@ -11,6 +11,7 @@ import (
 
 	"github.com/Resinat/Resin/internal/config"
 	"github.com/Resinat/Resin/internal/netutil"
+	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/outbound"
 	"github.com/Resinat/Resin/internal/routing"
 	M "github.com/sagernet/sing/common/metadata"
@@ -42,6 +43,8 @@ const (
 	socks4CmdConnect = 0x01
 	socks4RepGranted = 0x5A
 	socks4RepReject  = 0x5B
+
+	socks4MaxFieldLen = 255
 )
 
 // Socks5Handler handles SOCKS5 inbound connections.
@@ -54,18 +57,21 @@ type Socks5Handler struct {
 	events      EventEmitter
 	metricsSink MetricsEventSink
 	timeout     time.Duration
+
+	allowInsecureSOCKS4 bool
 }
 
 // Socks5HandlerConfig holds dependencies for the SOCKS5 handler.
 type Socks5HandlerConfig struct {
-	ProxyToken  string
-	AuthVersion string
-	Router      *routing.Router
-	Pool        outbound.PoolAccessor
-	Health      HealthRecorder
-	Events      EventEmitter
-	MetricsSink MetricsEventSink
-	Timeout     time.Duration
+	ProxyToken          string
+	AuthVersion         string
+	Router              *routing.Router
+	Pool                outbound.PoolAccessor
+	Health              HealthRecorder
+	Events              EventEmitter
+	MetricsSink         MetricsEventSink
+	Timeout             time.Duration
+	AllowInsecureSOCKS4 bool
 }
 
 // NewSocks5Handler creates a new SOCKS5 inbound handler.
@@ -83,14 +89,15 @@ func NewSocks5Handler(cfg Socks5HandlerConfig) *Socks5Handler {
 		timeout = 3 * time.Second
 	}
 	return &Socks5Handler{
-		token:       cfg.ProxyToken,
-		authVer:     authVer,
-		router:      cfg.Router,
-		pool:        cfg.Pool,
-		health:      cfg.Health,
-		events:      ev,
-		metricsSink: cfg.MetricsSink,
-		timeout:     timeout,
+		token:               cfg.ProxyToken,
+		authVer:             authVer,
+		router:              cfg.Router,
+		pool:                cfg.Pool,
+		health:              cfg.Health,
+		events:              ev,
+		metricsSink:         cfg.MetricsSink,
+		timeout:             timeout,
+		allowInsecureSOCKS4: cfg.AllowInsecureSOCKS4,
 	}
 }
 
@@ -99,10 +106,7 @@ func (h *Socks5Handler) ServeConn(conn net.Conn) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	clientIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
-	if clientIP == "" {
-		clientIP = conn.RemoteAddr().String()
-	}
+	clientIP := clientIPFromConn(conn)
 	deadline := time.Now().Add(h.timeout)
 	if err := conn.SetReadDeadline(deadline); err != nil {
 		conn.Close()
@@ -147,27 +151,61 @@ func (h *Socks5Handler) ServeConn(conn net.Conn) {
 		if se, ok := reqErr.(*socks5Error); ok {
 			replyCode = se.code
 		}
-		h.sendReply(conn, replyCode)
-		conn.Close()
+		h.writeSOCKS5FailureAndClose(conn, replyCode)
 		return
 	}
 
-	if err := h.sendReply(conn, socks5RepSuccess); err != nil {
+	lifecycle := newSOCKSLifecycle(h.events, clientIP, account, target, "SOCKS5")
+	defer lifecycle.finish()
+
+	routed, upstreamConn, proxyErr, dialErr, canceled := h.establishSOCKSUpstream(ctx, platName, account, target)
+	if canceled {
+		lifecycle.setNetOK(true)
 		conn.Close()
 		return
 	}
-	h.proxyConnect(ctx, conn, clientIP, platName, account, target, "SOCKS5")
+	if proxyErr != nil {
+		lifecycle.setProxyError(proxyErr)
+		lifecycle.setHTTPStatus(proxyErr.HTTPCode)
+		if dialErr != nil {
+			lifecycle.setUpstreamError("socks_dial", dialErr)
+			if h.health != nil && routed.Route.NodeHash != node.Zero {
+				go h.health.RecordResult(routed.Route.NodeHash, false)
+			}
+		}
+		h.writeSOCKS5FailureAndClose(conn, proxyErrorToSOCKS5Reply(proxyErr))
+		return
+	}
+	lifecycle.setRouteResult(routed.Route)
+
+	domain := netutil.ExtractDomain(target)
+	if h.health != nil {
+		go h.health.RecordLatency(routed.Route.NodeHash, domain, nil)
+	}
+
+	if err := h.sendReply(conn, socks5RepSuccess); err != nil {
+		lifecycle.setProxyError(ErrUpstreamRequestFailed)
+		lifecycle.setUpstreamError("socks_client_reply", err)
+		lifecycle.setNetOK(false)
+		conn.Close()
+		upstreamConn.Close()
+		return
+	}
+
+	h.relaySOCKSTunnel(ctx, conn, upstreamConn, routed.Route, domain, lifecycle)
 }
 
 // ServeConnSOCKS4 handles a single SOCKS4a connection (blocking).
 func (h *Socks5Handler) ServeConnSOCKS4(conn net.Conn) {
+	if !h.allowInsecureSOCKS4 || h.token != "" {
+		h.writeSOCKS4RejectAndClose(conn)
+		return
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	clientIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
-	if clientIP == "" {
-		clientIP = conn.RemoteAddr().String()
-	}
+	clientIP := clientIPFromConn(conn)
 	deadline := time.Now().Add(h.timeout)
 	if err := conn.SetReadDeadline(deadline); err != nil {
 		conn.Close()
@@ -176,8 +214,7 @@ func (h *Socks5Handler) ServeConnSOCKS4(conn net.Conn) {
 
 	target, err := h.readSOCKS4Request(conn)
 	if err != nil {
-		h.writeSOCKS4Reply(conn, socks4RepReject)
-		conn.Close()
+		h.writeSOCKS4RejectAndClose(conn)
 		return
 	}
 
@@ -187,69 +224,119 @@ func (h *Socks5Handler) ServeConnSOCKS4(conn net.Conn) {
 		return
 	}
 
-	// SOCKS4 has no authentication field; extract identity from null-terminated user ID.
-	// Format matches existing convention: user ID can be "platform:account".
-	// When proxy token is configured, SOCKS4 user ID is ignored (no secure auth in SOCKS4).
 	var platName, account string
-	// We don't parse SOCKS4 user ID for auth — SOCKS4 is inherently insecure.
+	lifecycle := newSOCKSLifecycle(h.events, clientIP, account, target, "SOCKS4")
+	defer lifecycle.finish()
 
-	h.writeSOCKS4Reply(conn, socks4RepGranted)
-	h.proxyConnect(ctx, conn, clientIP, platName, account, target, "SOCKS4")
+	routed, upstreamConn, proxyErr, dialErr, canceled := h.establishSOCKSUpstream(ctx, platName, account, target)
+	if canceled {
+		lifecycle.setNetOK(true)
+		conn.Close()
+		return
+	}
+	if proxyErr != nil {
+		lifecycle.setProxyError(proxyErr)
+		lifecycle.setHTTPStatus(proxyErr.HTTPCode)
+		if dialErr != nil {
+			lifecycle.setUpstreamError("socks_dial", dialErr)
+			if h.health != nil && routed.Route.NodeHash != node.Zero {
+				go h.health.RecordResult(routed.Route.NodeHash, false)
+			}
+		}
+		h.writeSOCKS4RejectAndClose(conn)
+		return
+	}
+	lifecycle.setRouteResult(routed.Route)
+
+	domain := netutil.ExtractDomain(target)
+	if h.health != nil {
+		go h.health.RecordLatency(routed.Route.NodeHash, domain, nil)
+	}
+
+	if err := h.writeSOCKS4Reply(conn, socks4RepGranted); err != nil {
+		lifecycle.setProxyError(ErrUpstreamRequestFailed)
+		lifecycle.setUpstreamError("socks_client_reply", err)
+		lifecycle.setNetOK(false)
+		conn.Close()
+		upstreamConn.Close()
+		return
+	}
+
+	h.relaySOCKSTunnel(ctx, conn, upstreamConn, routed.Route, domain, lifecycle)
 }
 
-// proxyConnect is the shared CONNECT tunnel logic for both SOCKS5 and SOCKS4.
-func (h *Socks5Handler) proxyConnect(ctx context.Context, conn net.Conn, clientIP, platName, account, target, methodLabel string) {
+func clientIPFromConn(conn net.Conn) string {
+	clientIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+	if clientIP == "" {
+		clientIP = conn.RemoteAddr().String()
+	}
+	return clientIP
+}
+
+func newSOCKSLifecycle(events EventEmitter, clientIP, account, target, methodLabel string) *socks5Lifecycle {
 	now := time.Now()
-	lifecycle := &socks5Lifecycle{
-		events:   h.events,
+	return &socks5Lifecycle{
+		events:   events,
 		finished: RequestFinishedEvent{ProxyType: ProxyTypeForward, IsConnect: true},
 		log: RequestLogEntry{
 			StartedAtNs: now.UnixNano(),
 			ProxyType:   ProxyTypeForward,
 			ClientIP:    clientIP,
 			HTTPMethod:  methodLabel,
+			Account:     account,
+			TargetHost:  target,
 		},
 	}
-	defer lifecycle.finish()
-	lifecycle.log.Account = account
-	lifecycle.log.TargetHost = target
+}
 
-	routed, routeErr := resolveRoutedOutbound(h.router, h.pool, platName, account, target)
-	if routeErr != nil {
-		lifecycle.setProxyError(routeErr)
-		lifecycle.setHTTPStatus(routeErr.HTTPCode)
-		return
+func (h *Socks5Handler) establishSOCKSUpstream(
+	ctx context.Context,
+	platName string,
+	account string,
+	target string,
+) (routed routedOutbound, upstreamConn net.Conn, proxyErr *ProxyError, dialErr error, canceled bool) {
+	routed, proxyErr = resolveRoutedOutbound(h.router, h.pool, platName, account, target)
+	if proxyErr != nil {
+		return routed, nil, proxyErr, nil, false
 	}
-	lifecycle.setRouteResult(routed.Route)
+	if routed.Route.NodeHash == node.Zero {
+		return routedOutbound{}, nil, ErrInternalError, nil, false
+	}
 
-	domain := netutil.ExtractDomain(target)
-	go h.health.RecordLatency(routed.Route.NodeHash, domain, nil)
-
-	rawConn, err := routed.Outbound.DialContext(ctx, "tcp", M.ParseSocksaddr(target))
-	if err != nil {
-		proxyErr := classifyConnectError(err)
-		lifecycle.setProxyError(proxyErr)
-		lifecycle.setUpstreamError("socks_dial", err)
-		if proxyErr != nil {
-			lifecycle.setHTTPStatus(proxyErr.HTTPCode)
-			go h.health.RecordResult(routed.Route.NodeHash, false)
+	upstreamConn, dialErr = routed.Outbound.DialContext(ctx, "tcp", M.ParseSocksaddr(target))
+	if dialErr != nil {
+		proxyErr = classifyConnectError(dialErr)
+		if proxyErr == nil {
+			return routed, nil, nil, dialErr, true
 		}
-		return
+		return routed, nil, proxyErr, dialErr, false
 	}
+	return routed, upstreamConn, nil, nil, false
+}
 
-	var upstreamBase net.Conn = rawConn
+func (h *Socks5Handler) relaySOCKSTunnel(
+	ctx context.Context,
+	conn net.Conn,
+	upstreamConn net.Conn,
+	route routing.RouteResult,
+	domain string,
+	lifecycle *socks5Lifecycle,
+) {
+	var upstreamBase net.Conn = upstreamConn
 	if h.metricsSink != nil {
 		h.metricsSink.OnConnectionLifecycle(ConnectionOutbound, ConnectionOpen)
-		upstreamBase = newCountingConn(rawConn, h.metricsSink)
+		upstreamBase = newCountingConn(upstreamConn, h.metricsSink)
 	}
-	upstreamConn := newTLSLatencyConn(upstreamBase, func(latency time.Duration) {
-		h.health.RecordLatency(routed.Route.NodeHash, domain, &latency)
+	tunneledUpstreamConn := newTLSLatencyConn(upstreamBase, func(latency time.Duration) {
+		if h.health != nil {
+			h.health.RecordLatency(route.NodeHash, domain, &latency)
+		}
 	})
 
 	// Bind upstream lifecycle to client disconnect.
 	go func() {
 		<-ctx.Done()
-		upstreamConn.Close()
+		tunneledUpstreamConn.Close()
 	}()
 
 	// Bidirectional tunnel.
@@ -259,13 +346,13 @@ func (h *Socks5Handler) proxyConnect(ctx context.Context, conn net.Conn, clientI
 	}
 	egressCh := make(chan copyResult, 1)
 	go func() {
-		defer upstreamConn.Close()
-		n, copyErr := io.Copy(upstreamConn, conn)
+		defer tunneledUpstreamConn.Close()
+		n, copyErr := io.Copy(tunneledUpstreamConn, conn)
 		egressCh <- copyResult{n: n, err: copyErr}
 	}()
-	ingressBytes, ingressErr := io.Copy(conn, upstreamConn)
+	ingressBytes, ingressErr := io.Copy(conn, tunneledUpstreamConn)
 	conn.Close()
-	upstreamConn.Close()
+	tunneledUpstreamConn.Close()
 	egressResult := <-egressCh
 
 	lifecycle.addIngressBytes(ingressBytes)
@@ -282,7 +369,28 @@ func (h *Socks5Handler) proxyConnect(ctx context.Context, conn net.Conn, clientI
 		}
 	}
 	lifecycle.setNetOK(okResult)
-	go h.health.RecordResult(routed.Route.NodeHash, okResult)
+	if h.health != nil {
+		go h.health.RecordResult(route.NodeHash, okResult)
+	}
+}
+
+func (h *Socks5Handler) writeSOCKS5FailureAndClose(conn net.Conn, rep byte) {
+	_ = h.sendReply(conn, rep)
+	conn.Close()
+}
+
+func (h *Socks5Handler) writeSOCKS4RejectAndClose(conn net.Conn) {
+	_ = h.writeSOCKS4Reply(conn, socks4RepReject)
+	conn.Close()
+}
+
+func proxyErrorToSOCKS5Reply(pe *ProxyError) byte {
+	switch pe {
+	case ErrUpstreamConnectFailed, ErrUpstreamTimeout:
+		return socks5RepHostUnreachable
+	default:
+		return socks5RepGeneralFailure
+	}
 }
 
 // socks5Lifecycle is a lightweight lifecycle tracker for SOCKS connections.
@@ -556,7 +664,7 @@ func (h *Socks5Handler) readSOCKS4Request(r io.Reader) (string, error) {
 	ip := net.IP(buf[4:8])
 
 	// Read null-terminated user ID.
-	userID, err := readNullTerminated(r)
+	userID, err := readNullTerminated(r, socks4MaxFieldLen)
 	if err != nil {
 		return "", fmt.Errorf("socks4: read user ID: %w", err)
 	}
@@ -566,7 +674,7 @@ func (h *Socks5Handler) readSOCKS4Request(r io.Reader) (string, error) {
 	isSOCKS4a := ip[0] == 0 && ip[1] == 0 && ip[2] == 0 && ip[3] != 0
 	var host string
 	if isSOCKS4a {
-		domain, err := readNullTerminated(r)
+		domain, err := readNullTerminated(r, socks4MaxFieldLen)
 		if err != nil {
 			return "", fmt.Errorf("socks4a: read domain: %w", err)
 		}
@@ -581,15 +689,16 @@ func (h *Socks5Handler) readSOCKS4Request(r io.Reader) (string, error) {
 }
 
 // writeSOCKS4Reply writes a SOCKS4 reply.
-func (h *Socks5Handler) writeSOCKS4Reply(w io.Writer, code byte) {
+func (h *Socks5Handler) writeSOCKS4Reply(w io.Writer, code byte) error {
 	reply := make([]byte, 8)
 	reply[0] = 0x00 // VN (ignored)
 	reply[1] = code
 	// bytes 2-7 are port and IP, set to zero
-	w.Write(reply)
+	_, err := w.Write(reply)
+	return err
 }
 
-func readNullTerminated(r io.Reader) (string, error) {
+func readNullTerminated(r io.Reader, maxLen int) (string, error) {
 	var buf []byte
 	b := make([]byte, 1)
 	for {
@@ -598,6 +707,9 @@ func readNullTerminated(r io.Reader) (string, error) {
 		}
 		if b[0] == 0 {
 			break
+		}
+		if len(buf) >= maxLen {
+			return "", fmt.Errorf("field exceeds maximum length %d", maxLen)
 		}
 		buf = append(buf, b[0])
 	}

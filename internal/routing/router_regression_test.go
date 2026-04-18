@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/platform"
 	"github.com/Resinat/Resin/internal/testutil"
@@ -245,6 +246,154 @@ func TestRouteRequest_SameIPRotationPrefersTargetLatencySample(t *testing.T) {
 	}
 	if updatedLease.ExpiryNs != originalLease.ExpiryNs {
 		t.Fatalf("same-ip rotation must not change expiry: got %d want %d", updatedLease.ExpiryNs, originalLease.ExpiryNs)
+	}
+}
+
+func TestRouteRequest_StickyThenSameIPThenPriorityTierFallback(t *testing.T) {
+	pool := newRouterTestPool()
+
+	priorityTiers, err := platform.CompilePriorityTiers([]model.PlatformPriorityTier{{
+		RegexFilters: []string{"tier1"},
+	}})
+	if err != nil {
+		t.Fatalf("CompilePriorityTiers: %v", err)
+	}
+
+	plat := platform.NewConfiguredPlatform(
+		"plat-precedence",
+		"Plat-Precedence",
+		nil,
+		nil,
+		nil,
+		priorityTiers,
+		int64(time.Hour),
+		string(platform.ReverseProxyMissActionTreatAsEmpty),
+		string(platform.ReverseProxyEmptyAccountBehaviorRandom),
+		"",
+		string(platform.AllocationPolicyBalanced),
+	)
+	pool.addPlatform(plat)
+
+	currentHash, currentEntry := newRoutableEntry(t, `{"id":"sticky-current"}`, "198.51.100.10")
+	sameIPHash, sameIPEntry := newRoutableEntry(t, `{"id":"sticky-same-ip"}`, "198.51.100.10")
+	tier1Hash, tier1Entry := newRoutableEntry(t, `{"id":"sticky-tier1"}`, "198.51.100.20")
+	pool.addEntry(currentHash, currentEntry)
+	pool.addEntry(sameIPHash, sameIPEntry)
+	pool.addEntry(tier1Hash, tier1Entry)
+	pool.rebuildPlatformView(plat)
+
+	// Rebuild with tag-aware lookup so all nodes stay in the platform pool,
+	// while only tier1Hash enters the explicit priority tier.
+	plat.FullRebuild(
+		func(fn func(node.Hash, *node.NodeEntry) bool) {
+			for _, item := range []struct {
+				hash  node.Hash
+				entry *node.NodeEntry
+			}{
+				{currentHash, currentEntry},
+				{sameIPHash, sameIPEntry},
+				{tier1Hash, tier1Entry},
+			} {
+				if !fn(item.hash, item.entry) {
+					return
+				}
+			}
+		},
+		func(_ string, hash node.Hash) (string, bool, []string, bool) {
+			switch hash {
+			case tier1Hash:
+				return "sub", true, []string{"tier1"}, true
+			case currentHash, sameIPHash:
+				return "sub", true, []string{"tier2"}, true
+			default:
+				return "", false, nil, false
+			}
+		},
+		func(_ netip.Addr) string { return "" },
+	)
+
+	router := newTestRouter(pool, nil)
+	state, _ := router.states.LoadOrCompute(plat.ID, func() (*PlatformRoutingState, bool) {
+		return NewPlatformRoutingState(), false
+	})
+
+	originalLease := Lease{
+		NodeHash:       currentHash,
+		EgressIP:       currentEntry.GetEgressIP(),
+		CreatedAtNs:    time.Now().Add(-time.Minute).UnixNano(),
+		ExpiryNs:       time.Now().Add(time.Hour).UnixNano(),
+		LastAccessedNs: time.Now().UnixNano(),
+	}
+	state.Leases.CreateLease("acct-precedence", originalLease)
+
+	// 1) Sticky lease should win even though a higher priority tier is available.
+	res, err := router.RouteRequest(plat.Name, "acct-precedence", "https://example.com")
+	if err != nil {
+		t.Fatalf("sticky route failed: %v", err)
+	}
+	if res.NodeHash != currentHash {
+		t.Fatalf("expected sticky lease node %s, got %s", currentHash.Hex(), res.NodeHash.Hex())
+	}
+	if res.LeaseCreated {
+		t.Fatal("sticky hit should not recreate lease")
+	}
+
+	// 2) After invalidation, same-IP rotation should win over priority tiers.
+	currentEntry.CircuitOpenSince.Store(time.Now().UnixNano())
+	plat.NotifyDirty(
+		currentHash,
+		pool.GetEntry,
+		func(_ string, hash node.Hash) (string, bool, []string, bool) {
+			switch hash {
+			case tier1Hash:
+				return "sub", true, []string{"tier1"}, true
+			case currentHash, sameIPHash:
+				return "sub", true, []string{"tier2"}, true
+			default:
+				return "", false, nil, false
+			}
+		},
+		func(_ netip.Addr) string { return "" },
+	)
+
+	res, err = router.RouteRequest(plat.Name, "acct-precedence", "https://example.com")
+	if err != nil {
+		t.Fatalf("same-ip route failed: %v", err)
+	}
+	if res.NodeHash != sameIPHash {
+		t.Fatalf("expected same-IP replacement node %s, got %s", sameIPHash.Hex(), res.NodeHash.Hex())
+	}
+	if res.LeaseCreated {
+		t.Fatal("same-IP rotation should update existing lease, not recreate it")
+	}
+
+	// 3) When same-IP options are gone, new lease selection should fall back to priority tiers.
+	sameIPEntry.CircuitOpenSince.Store(time.Now().UnixNano())
+	plat.NotifyDirty(
+		sameIPHash,
+		pool.GetEntry,
+		func(_ string, hash node.Hash) (string, bool, []string, bool) {
+			switch hash {
+			case tier1Hash:
+				return "sub", true, []string{"tier1"}, true
+			case currentHash, sameIPHash:
+				return "sub", true, []string{"tier2"}, true
+			default:
+				return "", false, nil, false
+			}
+		},
+		func(_ netip.Addr) string { return "" },
+	)
+
+	res, err = router.RouteRequest(plat.Name, "acct-precedence", "https://example.com")
+	if err != nil {
+		t.Fatalf("priority-tier fallback route failed: %v", err)
+	}
+	if res.NodeHash != tier1Hash {
+		t.Fatalf("expected priority-tier node %s, got %s", tier1Hash.Hex(), res.NodeHash.Hex())
+	}
+	if !res.LeaseCreated {
+		t.Fatal("expected lease recreation after sticky and same-IP options are exhausted")
 	}
 }
 

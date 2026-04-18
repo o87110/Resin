@@ -151,3 +151,82 @@ func TestSniffAndServe_RoutesSOCKS5ToHandler(t *testing.T) {
 	default:
 	}
 }
+
+func TestSniffAndServe_RoutesSOCKS4ToHandlerReject(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	httpCalled := make(chan struct{}, 1)
+	app := &resinApp{
+		inboundSrv: &http.Server{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				httpCalled <- struct{}{}
+			}),
+		},
+		socks5Srv: proxy.NewSocks5Handler(proxy.Socks5HandlerConfig{Timeout: 200 * time.Millisecond}),
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- app.sniffAndServe(&singleConnListener{conn: serverConn})
+	}()
+
+	if _, err := clientConn.Write([]byte{0x04}); err != nil {
+		t.Fatalf("write SOCKS4 version byte: %v", err)
+	}
+
+	reply := make([]byte, 8)
+	if _, err := io.ReadFull(clientConn, reply); err != nil {
+		t.Fatalf("read SOCKS4 reject reply: %v", err)
+	}
+	if reply[0] != 0x00 || reply[1] != 0x5B {
+		t.Fatalf("reply: got %v, want SOCKS4 reject", reply)
+	}
+
+	if _, err := clientConn.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("expected connection close after reject, got %v", err)
+	}
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("sniffAndServe error: got %v, want %v", err, net.ErrClosed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("sniffAndServe did not exit")
+	}
+
+	select {
+	case <-httpCalled:
+		t.Fatal("HTTP handler should not receive SOCKS4 traffic")
+	default:
+	}
+}
+
+func TestSocksSupportLabel(t *testing.T) {
+	if got := socksSupportLabel(false, ""); got != "HTTP + SOCKS5" {
+		t.Fatalf("default label = %q, want %q", got, "HTTP + SOCKS5")
+	}
+	if got := socksSupportLabel(true, "tok"); got != "HTTP + SOCKS5" {
+		t.Fatalf("protected label = %q, want %q", got, "HTTP + SOCKS5")
+	}
+	if got := socksSupportLabel(true, ""); got != "HTTP + SOCKS5 + SOCKS4 (unsafe)" {
+		t.Fatalf("unsafe label = %q, want %q", got, "HTTP + SOCKS5 + SOCKS4 (unsafe)")
+	}
+}
+
+func TestInsecureSOCKS4StartupWarning(t *testing.T) {
+	if msg := insecureSOCKS4StartupWarning(false, ""); msg != "" {
+		t.Fatalf("expected empty warning, got %q", msg)
+	}
+	if msg := insecureSOCKS4StartupWarning(true, ""); msg != "" {
+		t.Fatalf("expected empty warning without proxy token, got %q", msg)
+	}
+	msg := insecureSOCKS4StartupWarning(true, "tok")
+	if msg == "" {
+		t.Fatal("expected warning when SOCKS4 is enabled with proxy token configured")
+	}
+	if !strings.Contains(msg, "RESIN_ALLOW_INSECURE_SOCKS4=true") {
+		t.Fatalf("warning should mention RESIN_ALLOW_INSECURE_SOCKS4=true, got %q", msg)
+	}
+}

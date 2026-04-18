@@ -990,6 +990,19 @@ func TestAPIContract_PlatformPriorityTiersValidation(t *testing.T) {
 		t.Fatalf("patch invalid priority_tier region status: got %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
 	assertErrorCode(t, rec, "INVALID_ARGUMENT")
+
+	rec = doJSONRequest(t, srv, http.MethodPatch, "/api/v1/platforms/"+platformID, map[string]any{
+		"priority_tiers": []map[string]any{
+			{
+				"regex_filters":  []string{"residential"},
+				"regoin_filters": []string{"us"},
+			},
+		},
+	}, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("patch unknown priority_tier field status: got %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	assertErrorCode(t, rec, "INVALID_ARGUMENT")
 }
 
 func TestAPIContract_PlatformEmptyAccountBehavior(t *testing.T) {

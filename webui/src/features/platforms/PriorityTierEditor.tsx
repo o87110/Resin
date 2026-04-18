@@ -571,15 +571,15 @@ export function PriorityTierEditor({ form, hasUnsavedChanges = false, platformId
               <span>{t("平台内优先级分层（可选）")}</span>
               <span
                 className="subscription-info-icon"
-                title={t("只对已经被下方平台筛选规则选中的节点再次分层；路由时优先使用最前面的非空层。")}
-                aria-label={t("只对已经被下方平台筛选规则选中的节点再次分层；路由时优先使用最前面的非空层。")}
+                title={t("只对已经被下方平台筛选规则选中的节点再次分层；仅影响新建选点，不改变已有粘性租约，也不覆盖同出口 IP 优先切换。")}
+                aria-label={t("只对已经被下方平台筛选规则选中的节点再次分层；仅影响新建选点，不改变已有粘性租约，也不覆盖同出口 IP 优先切换。")}
                 tabIndex={0}
               >
                 <Info size={13} />
               </span>
             </label>
             <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
-              {t("先筛出属于平台的候选节点，再按这里的顺序决定先用哪一层；未命中任何显式层的节点会自动落入隐式最后一层。")}
+              {t("先筛出属于平台的候选节点，再按这里的顺序决定新建选点先用哪一层；未命中任何显式层的节点会自动落入隐式最后一层。")}
             </p>
           </div>
           <div className="platform-priority-tier-header-actions">

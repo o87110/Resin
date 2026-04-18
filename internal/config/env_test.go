@@ -78,6 +78,7 @@ func TestLoadEnvConfig_Defaults(t *testing.T) {
 	// Auth
 	assertEqual(t, "AuthVersion", cfg.AuthVersion, AuthVersionLegacyV0)
 	assertEqual(t, "Socks5Timeout", cfg.Socks5Timeout, 3*time.Second)
+	assertEqual(t, "AllowInsecureSOCKS4", cfg.AllowInsecureSOCKS4, false)
 
 	// Metrics
 	assertEqual(t, "MetricThroughputIntervalSeconds", cfg.MetricThroughputIntervalSeconds, 2)
@@ -112,6 +113,7 @@ func TestLoadEnvConfig_EnvOverrides(t *testing.T) {
 	envs["RESIN_PROXY_TRANSPORT_MAX_IDLE_CONNS_PER_HOST"] = "128"
 	envs["RESIN_PROXY_TRANSPORT_IDLE_CONN_TIMEOUT"] = "2m"
 	envs["RESIN_SOCKS5_TIMEOUT"] = "7s"
+	envs["RESIN_ALLOW_INSECURE_SOCKS4"] = "true"
 	envs["RESIN_REQUEST_LOG_QUEUE_FLUSH_INTERVAL"] = "10m"
 	setEnvs(t, envs)
 
@@ -152,9 +154,57 @@ func TestLoadEnvConfig_EnvOverrides(t *testing.T) {
 	assertEqual(t, "ProxyTransportMaxIdleConnsPerHost", cfg.ProxyTransportMaxIdleConnsPerHost, 128)
 	assertEqual(t, "ProxyTransportIdleConnTimeout", cfg.ProxyTransportIdleConnTimeout, 2*time.Minute)
 	assertEqual(t, "Socks5Timeout", cfg.Socks5Timeout, 7*time.Second)
+	assertEqual(t, "AllowInsecureSOCKS4", cfg.AllowInsecureSOCKS4, true)
 	if cfg.RequestLogQueueFlushInterval.String() != "10m0s" {
 		t.Errorf("RequestLogQueueFlushInterval: got %v, want 10m", cfg.RequestLogQueueFlushInterval)
 	}
+}
+
+func TestEnvBool(t *testing.T) {
+	t.Run("unset returns default", func(t *testing.T) {
+		var errs []string
+		if got := envBool("RESIN_ALLOW_INSECURE_SOCKS4", true, &errs); !got {
+			t.Fatal("expected default true when env is unset")
+		}
+		if len(errs) != 0 {
+			t.Fatalf("unexpected errors: %v", errs)
+		}
+	})
+
+	t.Run("valid value parses", func(t *testing.T) {
+		t.Setenv("RESIN_ALLOW_INSECURE_SOCKS4", "true")
+		var errs []string
+		if got := envBool("RESIN_ALLOW_INSECURE_SOCKS4", false, &errs); !got {
+			t.Fatal("expected parsed true")
+		}
+		if len(errs) != 0 {
+			t.Fatalf("unexpected errors: %v", errs)
+		}
+	})
+
+	t.Run("invalid value appends error and returns default", func(t *testing.T) {
+		t.Setenv("RESIN_ALLOW_INSECURE_SOCKS4", "not-a-bool")
+		var errs []string
+		if got := envBool("RESIN_ALLOW_INSECURE_SOCKS4", true, &errs); !got {
+			t.Fatal("expected default true when parsing fails")
+		}
+		if len(errs) != 1 {
+			t.Fatalf("expected 1 error, got %d", len(errs))
+		}
+		assertContains(t, errs[0], "RESIN_ALLOW_INSECURE_SOCKS4: invalid boolean")
+	})
+}
+
+func TestLoadEnvConfig_InvalidAllowInsecureSOCKS4(t *testing.T) {
+	envs := requiredEnvs()
+	envs["RESIN_ALLOW_INSECURE_SOCKS4"] = "definitely-not-bool"
+	setEnvs(t, envs)
+
+	_, err := LoadEnvConfig()
+	if err == nil {
+		t.Fatal("expected error for invalid RESIN_ALLOW_INSECURE_SOCKS4")
+	}
+	assertContains(t, err.Error(), `RESIN_ALLOW_INSECURE_SOCKS4: invalid boolean "definitely-not-bool"`)
 }
 
 func TestLoadEnvConfig_DefaultPlatformFixedHeaderMultiline(t *testing.T) {

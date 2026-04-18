@@ -397,13 +397,13 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "最多 8 层，按顺序命中；层内仍使用当前层内分配策略。":
     "Up to 8 layers. Matching follows the configured order; nodes inside the selected layer still use the current intra-tier allocation policy.",
   "先使用第一个非空优先级层；未命中任何显式层的节点会自动落入隐式最后一层。":
-    "Use the first non-empty priority layer. Nodes matching no explicit layer automatically fall back to an implicit final layer.",
+    "Use the first non-empty priority layer for new route selection. Nodes matching no explicit layer automatically fall back to an implicit final layer.",
   "未配置优先级层时，将直接在整个平台候选集中按层内分配策略选点。":
     "Without priority tiers, routing picks from the whole platform candidate pool using the intra-tier allocation policy.",
-  "只对已经被下方平台筛选规则选中的节点再次分层；路由时优先使用最前面的非空层。":
-    "Only nodes already selected by the platform filter rules below are tiered again here; routing always prefers the first non-empty tier.",
-  "先筛出属于平台的候选节点，再按这里的顺序决定先用哪一层；未命中任何显式层的节点会自动落入隐式最后一层。":
-    "First filter nodes into this platform, then use the order here to decide which tier is used first; nodes matching no explicit tier fall back to an implicit final tier.",
+  "只对已经被下方平台筛选规则选中的节点再次分层；仅影响新建选点，不改变已有粘性租约，也不覆盖同出口 IP 优先切换。":
+    "Only nodes already selected by the platform filter rules below are tiered again here. This only affects new route selection; it does not change existing sticky leases or override same-egress-IP failover.",
+  "先筛出属于平台的候选节点，再按这里的顺序决定新建选点先用哪一层；未命中任何显式层的节点会自动落入隐式最后一层。":
+    "First filter nodes into this platform, then use the order here to decide which tier new route selection uses first; nodes matching no explicit tier fall back to an implicit final tier.",
   "平台基础筛选范围（哪些节点属于这个平台）": "Platform base filter scope (which nodes belong to this platform)",
   "这里先决定哪些节点能进入当前平台；只有进入平台的节点，才会继续参与上方的优先级分层。":
     "This section decides which nodes can enter the current platform; only those nodes will participate in the priority tiers above.",
