@@ -10,6 +10,7 @@ import (
 
 	"github.com/Resinat/Resin/internal/config"
 	"github.com/Resinat/Resin/internal/model"
+	"github.com/Resinat/Resin/internal/platform"
 )
 
 // helper: create a state.db in a temp dir, init DDL, return StateRepo + cleanup.
@@ -65,6 +66,9 @@ func TestMigrateStateDB_UpgradesLegacyPlatformsColumns(t *testing.T) {
 	if ok, err := hasTableColumn(db, "platforms", "exclude_regex_filters_json"); err != nil || !ok {
 		t.Fatalf("expected migrated column exclude_regex_filters_json, ok=%v err=%v", ok, err)
 	}
+	if ok, err := hasTableColumn(db, "platforms", "priority_tiers_json"); err != nil || !ok {
+		t.Fatalf("expected migrated column priority_tiers_json, ok=%v err=%v", ok, err)
+	}
 }
 
 func TestMigrateStateDB_LegacyBaselineAdvancesToLatest(t *testing.T) {
@@ -106,8 +110,8 @@ func TestMigrateStateDB_LegacyBaselineAdvancesToLatest(t *testing.T) {
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddExcludeRegexFilters {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddExcludeRegexFilters)
+	if version != stateVersionAddPriorityTiers {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddPriorityTiers)
 	}
 }
 
@@ -178,8 +182,8 @@ func TestMigrateStateDB_NormalizesLegacyRandomMissAction(t *testing.T) {
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddExcludeRegexFilters {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddExcludeRegexFilters)
+	if version != stateVersionAddPriorityTiers {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddPriorityTiers)
 	}
 }
 
@@ -240,6 +244,10 @@ func TestStateRepo_Platforms_CRUD(t *testing.T) {
 	p := model.Platform{
 		ID: "plat-1", Name: "Default", StickyTTLNs: 1000,
 		RegexFilters: []string{}, ExcludeRegexFilters: []string{`relay`}, RegionFilters: []string{},
+		PriorityTiers: []model.PlatformPriorityTier{{
+			RegexFilters:  []string{`residential`},
+			RegionFilters: []string{"hk"},
+		}},
 		ReverseProxyMissAction: "TREAT_AS_EMPTY", AllocationPolicy: "BALANCED",
 		UpdatedAtNs: now,
 	}
@@ -263,6 +271,9 @@ func TestStateRepo_Platforms_CRUD(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.ExcludeRegexFilters, []string{`relay`}) {
 		t.Fatalf("unexpected exclude_regex_filters: got %v, want %v", got.ExcludeRegexFilters, []string{`relay`})
+	}
+	if want := platform.NormalizePriorityTiers(p.PriorityTiers); !reflect.DeepEqual(got.PriorityTiers, want) {
+		t.Fatalf("unexpected priority_tiers: got %v, want %v", got.PriorityTiers, want)
 	}
 
 	// List.
@@ -402,10 +413,23 @@ func TestStateRepo_Platform_ValidationRejectsInvalidRegex(t *testing.T) {
 		t.Fatal("expected error for invalid exclude_regex_filters")
 	}
 
+	// Invalid priority_tiers.
+	bad = base
+	bad.PriorityTiers = []model.PlatformPriorityTier{{}}
+	if err := repo.UpsertPlatform(bad); err == nil {
+		t.Fatal("expected error for empty priority_tier")
+	}
+
 	// Valid config should still succeed.
 	base.RegexFilters = []string{"^ss$", "vmess"}
 	base.ExcludeRegexFilters = []string{"relay"}
 	base.RegionFilters = []string{"us", "jp"}
+	base.PriorityTiers = []model.PlatformPriorityTier{{
+		RegexFilters: []string{"^ss$"},
+	}, {
+		ExcludeRegexFilters: []string{"relay"},
+		RegionFilters:       []string{"us"},
+	}}
 	if err := repo.UpsertPlatform(base); err != nil {
 		t.Fatalf("valid platform rejected: %v", err)
 	}

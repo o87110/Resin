@@ -58,6 +58,7 @@ func NewConfiguredPlatform(
 	regexFilters []*regexp.Regexp,
 	excludeRegexFilters []*regexp.Regexp,
 	regionFilters []string,
+	priorityTiers []*PriorityTier,
 	stickyTTLNs int64,
 	missAction string,
 	emptyAccountBehavior string,
@@ -70,6 +71,7 @@ func NewConfiguredPlatform(
 		fixedHeaders = nil
 	}
 	plat := NewPlatformWithExclude(id, name, regexFilters, excludeRegexFilters, regionFilters)
+	plat.PriorityTiers = clonePriorityTiers(priorityTiers)
 	plat.StickyTTLNs = stickyTTLNs
 	plat.ReverseProxyMissAction = missAction
 	plat.ReverseProxyEmptyAccountBehavior = emptyAccountBehavior
@@ -110,6 +112,10 @@ func BuildFromModel(mp model.Platform) (*Platform, error) {
 	if err := ValidateRegionFilters(mp.RegionFilters); err != nil {
 		return nil, err
 	}
+	priorityTiers, err := CompilePriorityTiers(mp.PriorityTiers)
+	if err != nil {
+		return nil, fmt.Errorf("decode platform %s: %w", mp.ID, err)
+	}
 	emptyAccountBehavior := mp.ReverseProxyEmptyAccountBehavior
 	if !ReverseProxyEmptyAccountBehavior(emptyAccountBehavior).IsValid() {
 		emptyAccountBehavior = string(ReverseProxyEmptyAccountBehaviorRandom)
@@ -140,6 +146,7 @@ func BuildFromModel(mp model.Platform) (*Platform, error) {
 		regexFilters,
 		excludeRegexFilters,
 		append([]string(nil), mp.RegionFilters...),
+		priorityTiers,
 		mp.StickyTTLNs,
 		string(missAction),
 		emptyAccountBehavior,

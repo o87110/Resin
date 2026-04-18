@@ -22,18 +22,19 @@ import (
 
 // PlatformResponse is the API response model for a platform.
 type PlatformResponse struct {
-	ID                               string   `json:"id"`
-	Name                             string   `json:"name"`
-	StickyTTL                        string   `json:"sticky_ttl"`
-	RegexFilters                     []string `json:"regex_filters"`
-	ExcludeRegexFilters              []string `json:"exclude_regex_filters"`
-	RegionFilters                    []string `json:"region_filters"`
-	RoutableNodeCount                int      `json:"routable_node_count"`
-	ReverseProxyMissAction           string   `json:"reverse_proxy_miss_action"`
-	ReverseProxyEmptyAccountBehavior string   `json:"reverse_proxy_empty_account_behavior"`
-	ReverseProxyFixedAccountHeader   string   `json:"reverse_proxy_fixed_account_header"`
-	AllocationPolicy                 string   `json:"allocation_policy"`
-	UpdatedAt                        string   `json:"updated_at"`
+	ID                               string                       `json:"id"`
+	Name                             string                       `json:"name"`
+	StickyTTL                        string                       `json:"sticky_ttl"`
+	RegexFilters                     []string                     `json:"regex_filters"`
+	ExcludeRegexFilters              []string                     `json:"exclude_regex_filters"`
+	RegionFilters                    []string                     `json:"region_filters"`
+	PriorityTiers                    []model.PlatformPriorityTier `json:"priority_tiers"`
+	RoutableNodeCount                int                          `json:"routable_node_count"`
+	ReverseProxyMissAction           string                       `json:"reverse_proxy_miss_action"`
+	ReverseProxyEmptyAccountBehavior string                       `json:"reverse_proxy_empty_account_behavior"`
+	ReverseProxyFixedAccountHeader   string                       `json:"reverse_proxy_fixed_account_header"`
+	AllocationPolicy                 string                       `json:"allocation_policy"`
+	UpdatedAt                        string                       `json:"updated_at"`
 }
 
 func platformToResponse(p model.Platform) PlatformResponse {
@@ -46,6 +47,7 @@ func platformToResponse(p model.Platform) PlatformResponse {
 		RegexFilters:                     append([]string{}, p.RegexFilters...),
 		ExcludeRegexFilters:              append([]string{}, p.ExcludeRegexFilters...),
 		RegionFilters:                    append([]string{}, p.RegionFilters...),
+		PriorityTiers:                    platform.NormalizePriorityTiers(p.PriorityTiers),
 		RoutableNodeCount:                0,
 		ReverseProxyMissAction:           p.ReverseProxyMissAction,
 		ReverseProxyEmptyAccountBehavior: behavior,
@@ -73,6 +75,7 @@ type platformConfig struct {
 	RegexFilters                     []string
 	ExcludeRegexFilters              []string
 	RegionFilters                    []string
+	PriorityTiers                    []model.PlatformPriorityTier
 	ReverseProxyMissAction           string
 	ReverseProxyEmptyAccountBehavior string
 	ReverseProxyFixedAccountHeader   string
@@ -101,6 +104,7 @@ func (s *ControlPlaneService) defaultPlatformConfig(name string) platformConfig 
 		RegexFilters:           append([]string{}, s.EnvCfg.DefaultPlatformRegexFilters...),
 		ExcludeRegexFilters:    []string{},
 		RegionFilters:          append([]string{}, s.EnvCfg.DefaultPlatformRegionFilters...),
+		PriorityTiers:          []model.PlatformPriorityTier{},
 		ReverseProxyMissAction: s.EnvCfg.DefaultPlatformReverseProxyMissAction,
 		ReverseProxyEmptyAccountBehavior: normalizePlatformEmptyAccountBehavior(
 			s.EnvCfg.DefaultPlatformReverseProxyEmptyAccountBehavior,
@@ -119,6 +123,7 @@ func platformConfigFromModel(mp model.Platform) platformConfig {
 		RegexFilters:                     append([]string{}, mp.RegexFilters...),
 		ExcludeRegexFilters:              append([]string{}, mp.ExcludeRegexFilters...),
 		RegionFilters:                    append([]string{}, mp.RegionFilters...),
+		PriorityTiers:                    platform.NormalizePriorityTiers(mp.PriorityTiers),
 		ReverseProxyMissAction:           mp.ReverseProxyMissAction,
 		ReverseProxyEmptyAccountBehavior: normalizePlatformEmptyAccountBehavior(mp.ReverseProxyEmptyAccountBehavior),
 		ReverseProxyFixedAccountHeader:   normalizeHeaderFieldName(mp.ReverseProxyFixedAccountHeader),
@@ -134,6 +139,7 @@ func (cfg platformConfig) toModel(id string, updatedAtNs int64) model.Platform {
 		RegexFilters:                     append([]string{}, cfg.RegexFilters...),
 		ExcludeRegexFilters:              append([]string{}, cfg.ExcludeRegexFilters...),
 		RegionFilters:                    append([]string{}, cfg.RegionFilters...),
+		PriorityTiers:                    platform.NormalizePriorityTiers(cfg.PriorityTiers),
 		ReverseProxyMissAction:           cfg.ReverseProxyMissAction,
 		ReverseProxyEmptyAccountBehavior: cfg.ReverseProxyEmptyAccountBehavior,
 		ReverseProxyFixedAccountHeader:   cfg.ReverseProxyFixedAccountHeader,
@@ -151,12 +157,17 @@ func (cfg platformConfig) toRuntime(id string) (*platform.Platform, error) {
 	if err != nil {
 		return nil, err
 	}
+	priorityTiers, err := platform.CompilePriorityTiers(cfg.PriorityTiers)
+	if err != nil {
+		return nil, err
+	}
 	return platform.NewConfiguredPlatform(
 		id,
 		cfg.Name,
 		compiledRegexFilters,
 		compiledExcludeRegexFilters,
 		cfg.RegionFilters,
+		priorityTiers,
 		cfg.StickyTTLNs,
 		cfg.ReverseProxyMissAction,
 		cfg.ReverseProxyEmptyAccountBehavior,
@@ -229,6 +240,13 @@ func validatePlatformAllocationPolicy(raw string) *ServiceError {
 	))
 }
 
+func validatePlatformPriorityTiers(tiers []model.PlatformPriorityTier) *ServiceError {
+	if err := platform.ValidatePriorityTiers(tiers); err != nil {
+		return invalidArg(err.Error())
+	}
+	return nil
+}
+
 func setPlatformStickyTTL(cfg *platformConfig, d time.Duration) *ServiceError {
 	if d <= 0 {
 		return invalidArg("sticky_ttl: must be > 0")
@@ -268,6 +286,9 @@ func validatePlatformConfig(cfg *platformConfig, validateRegionFilters bool) *Se
 		}
 	}
 	if err := validatePlatformEmptyAccountConfig(cfg); err != nil {
+		return err
+	}
+	if err := validatePlatformPriorityTiers(cfg.PriorityTiers); err != nil {
 		return err
 	}
 	return nil
@@ -331,15 +352,16 @@ func (s *ControlPlaneService) GetPlatform(id string) (*PlatformResponse, error) 
 
 // CreatePlatformRequest holds create platform parameters.
 type CreatePlatformRequest struct {
-	Name                             *string  `json:"name"`
-	StickyTTL                        *string  `json:"sticky_ttl"`
-	RegexFilters                     []string `json:"regex_filters"`
-	ExcludeRegexFilters              []string `json:"exclude_regex_filters"`
-	RegionFilters                    []string `json:"region_filters"`
-	ReverseProxyMissAction           *string  `json:"reverse_proxy_miss_action"`
-	ReverseProxyEmptyAccountBehavior *string  `json:"reverse_proxy_empty_account_behavior"`
-	ReverseProxyFixedAccountHeader   *string  `json:"reverse_proxy_fixed_account_header"`
-	AllocationPolicy                 *string  `json:"allocation_policy"`
+	Name                             *string                      `json:"name"`
+	StickyTTL                        *string                      `json:"sticky_ttl"`
+	RegexFilters                     []string                     `json:"regex_filters"`
+	ExcludeRegexFilters              []string                     `json:"exclude_regex_filters"`
+	RegionFilters                    []string                     `json:"region_filters"`
+	PriorityTiers                    []model.PlatformPriorityTier `json:"priority_tiers"`
+	ReverseProxyMissAction           *string                      `json:"reverse_proxy_miss_action"`
+	ReverseProxyEmptyAccountBehavior *string                      `json:"reverse_proxy_empty_account_behavior"`
+	ReverseProxyFixedAccountHeader   *string                      `json:"reverse_proxy_fixed_account_header"`
+	AllocationPolicy                 *string                      `json:"allocation_policy"`
 }
 
 // CreatePlatform creates a new platform.
@@ -378,6 +400,9 @@ func (s *ControlPlaneService) CreatePlatform(req CreatePlatformRequest) (*Platfo
 	}
 	if req.RegionFilters != nil {
 		cfg.RegionFilters = req.RegionFilters
+	}
+	if req.PriorityTiers != nil {
+		cfg.PriorityTiers = platform.NormalizePriorityTiers(req.PriorityTiers)
 	}
 	if req.ReverseProxyMissAction != nil {
 		if err := setPlatformMissAction(&cfg, *req.ReverseProxyMissAction); err != nil {
@@ -485,6 +510,11 @@ func (s *ControlPlaneService) UpdatePlatform(id string, patchJSON json.RawMessag
 	} else if ok {
 		regionFiltersPatched = true
 		cfg.RegionFilters = filters
+	}
+	if tiers, ok, err := patch.optionalPriorityTierSlice("priority_tiers"); err != nil {
+		return nil, err
+	} else if ok {
+		cfg.PriorityTiers = platform.NormalizePriorityTiers(tiers)
 	}
 
 	if ma, ok, err := patch.optionalString("reverse_proxy_miss_action"); err != nil {
@@ -594,6 +624,29 @@ type PlatformSpecFilter struct {
 	RegionFilters       []string `json:"region_filters"`
 }
 
+// PreviewPriorityTiersRequest holds preview priority-tier parameters.
+type PreviewPriorityTiersRequest struct {
+	PlatformID   *string                          `json:"platform_id"`
+	PlatformSpec *PreviewPriorityTierPlatformSpec `json:"platform_spec"`
+	TierKey      *string                          `json:"tier_key"`
+}
+
+// PreviewPriorityTierPlatformSpec describes a draft platform filter + tier configuration.
+type PreviewPriorityTierPlatformSpec struct {
+	RegexFilters        []string                     `json:"regex_filters"`
+	ExcludeRegexFilters []string                     `json:"exclude_regex_filters"`
+	RegionFilters       []string                     `json:"region_filters"`
+	PriorityTiers       []model.PlatformPriorityTier `json:"priority_tiers"`
+}
+
+// PlatformPriorityTierViewSummary describes one runtime tier-backed node group.
+type PlatformPriorityTierViewSummary struct {
+	TierKey   string `json:"tier_key"`
+	Label     string `json:"label"`
+	Kind      string `json:"kind"`
+	NodeCount int    `json:"node_count"`
+}
+
 // NodeSummary is the API response for a node.
 type NodeSummary struct {
 	NodeHash                         string    `json:"node_hash"`
@@ -612,6 +665,15 @@ type NodeSummary struct {
 	ReferenceLatencyMs               *float64  `json:"reference_latency_ms,omitempty"`
 	LastEgressUpdateAttempt          string    `json:"last_egress_update_attempt,omitempty"`
 	Tags                             []NodeTag `json:"tags"`
+}
+
+// PriorityTierNodeSummary extends NodeSummary with tier metadata for preview/list UIs.
+type PriorityTierNodeSummary struct {
+	NodeSummary
+	TierKey   string `json:"tier_key"`
+	TierKind  string `json:"tier_kind"`
+	TierLabel string `json:"tier_label"`
+	TierIndex int    `json:"tier_index"`
 }
 
 // IsHealthyAndEnabled follows the node-summary health rule used by API/UI
@@ -701,6 +763,177 @@ func (s *ControlPlaneService) nodeEntryToSummary(h node.Hash, entry *node.NodeEn
 		ns.Tags = []NodeTag{}
 	}
 	return ns
+}
+
+func platformPriorityTierLabel(kind string, tierIndex int) string {
+	switch kind {
+	case platform.PriorityTierViewKindExplicit:
+		return fmt.Sprintf("Priority tier %d", tierIndex+1)
+	case platform.PriorityTierViewKindFallback:
+		return "Fallback tier"
+	case platform.PriorityTierViewKindPlatformPool:
+		return "Platform pool"
+	default:
+		return "Unknown tier"
+	}
+}
+
+func (s *ControlPlaneService) getRuntimePlatform(id string) (*platform.Platform, error) {
+	if s == nil || s.Pool == nil {
+		return nil, internal("get runtime platform", errors.New("platform pool is unavailable"))
+	}
+	plat, ok := s.Pool.GetPlatform(id)
+	if !ok || plat == nil {
+		return nil, notFound("platform not found")
+	}
+	return plat, nil
+}
+
+func (s *ControlPlaneService) priorityTierPreviewGeoLookup() platform.GeoLookupFunc {
+	if s != nil && s.GeoIP != nil {
+		return s.GeoIP.Lookup
+	}
+	return nil
+}
+
+func (s *ControlPlaneService) buildPriorityTierPreviewPlatform(spec *PreviewPriorityTierPlatformSpec) (*platform.Platform, error) {
+	if s == nil || s.Pool == nil {
+		return nil, internal("build preview platform", errors.New("platform pool is unavailable"))
+	}
+	if spec == nil {
+		return nil, invalidArg("platform_spec is required")
+	}
+
+	cfg := s.defaultPlatformConfig("preview-priority-tiers")
+	cfg.RegexFilters = append([]string{}, spec.RegexFilters...)
+	cfg.ExcludeRegexFilters = append([]string{}, spec.ExcludeRegexFilters...)
+	cfg.RegionFilters = append([]string{}, spec.RegionFilters...)
+	cfg.PriorityTiers = platform.NormalizePriorityTiers(spec.PriorityTiers)
+
+	if err := validatePlatformConfig(&cfg, true); err != nil {
+		return nil, err
+	}
+
+	plat, err := cfg.toRuntime("preview-priority-tiers")
+	if err != nil {
+		return nil, invalidArg(err.Error())
+	}
+	plat.FullRebuild(s.Pool.Range, s.Pool.MakeSubLookup(), s.priorityTierPreviewGeoLookup())
+	return plat, nil
+}
+
+func (s *ControlPlaneService) resolvePriorityTierPreviewPlatform(req PreviewPriorityTiersRequest) (*platform.Platform, error) {
+	hasPlatformID := req.PlatformID != nil && *req.PlatformID != ""
+	hasPlatformSpec := req.PlatformSpec != nil
+	if hasPlatformID == hasPlatformSpec {
+		return nil, invalidArg("exactly one of platform_id or platform_spec is required")
+	}
+	if hasPlatformID {
+		return s.getRuntimePlatform(*req.PlatformID)
+	}
+	return s.buildPriorityTierPreviewPlatform(req.PlatformSpec)
+}
+
+// ListPlatformPriorityTierViews returns runtime tier group summaries for a platform.
+func (s *ControlPlaneService) ListPlatformPriorityTierViews(id string) ([]PlatformPriorityTierViewSummary, error) {
+	plat, err := s.getRuntimePlatform(id)
+	if err != nil {
+		return nil, err
+	}
+
+	descriptors := plat.TierViewDescriptors()
+	summaries := make([]PlatformPriorityTierViewSummary, 0, len(descriptors))
+	for _, descriptor := range descriptors {
+		nodeCount := 0
+		if descriptor.View != nil {
+			nodeCount = descriptor.View.Size()
+		}
+		summaries = append(summaries, PlatformPriorityTierViewSummary{
+			TierKey:   descriptor.Key,
+			Label:     platformPriorityTierLabel(descriptor.Kind, descriptor.Index),
+			Kind:      descriptor.Kind,
+			NodeCount: nodeCount,
+		})
+	}
+	return summaries, nil
+}
+
+// ListPlatformPriorityTierNodes returns node summaries for one runtime tier group.
+func (s *ControlPlaneService) ListPlatformPriorityTierNodes(id string, tierKey string) ([]NodeSummary, error) {
+	plat, err := s.getRuntimePlatform(id)
+	if err != nil {
+		return nil, err
+	}
+	descriptor, ok := plat.TierViewDescriptorByKey(strings.TrimSpace(tierKey))
+	if !ok || descriptor.View == nil {
+		return nil, invalidArg("tier_key: invalid value")
+	}
+
+	result := make([]NodeSummary, 0, descriptor.View.Size())
+	descriptor.View.Range(func(h node.Hash) bool {
+		entry, ok := s.Pool.GetEntry(h)
+		if !ok || entry == nil {
+			return true
+		}
+		result = append(result, s.nodeEntryToSummary(h, entry))
+		return true
+	})
+	return result, nil
+}
+
+// PreviewPriorityTierNodes previews runtime-tier node results for a saved platform or draft platform spec.
+func (s *ControlPlaneService) PreviewPriorityTierNodes(req PreviewPriorityTiersRequest) ([]PriorityTierNodeSummary, error) {
+	if s == nil || s.Pool == nil {
+		return nil, internal("preview priority tiers", errors.New("platform pool is unavailable"))
+	}
+
+	plat, err := s.resolvePriorityTierPreviewPlatform(req)
+	if err != nil {
+		return nil, err
+	}
+
+	descriptors := plat.TierViewDescriptors()
+	if req.TierKey != nil {
+		tierKey := strings.TrimSpace(*req.TierKey)
+		if tierKey == "" {
+			return nil, invalidArg("tier_key: invalid value")
+		}
+		descriptor, ok := plat.TierViewDescriptorByKey(tierKey)
+		if !ok || descriptor.View == nil {
+			return nil, invalidArg("tier_key: invalid value")
+		}
+		descriptors = []platform.TierViewDescriptor{descriptor}
+	}
+
+	total := 0
+	for _, descriptor := range descriptors {
+		if descriptor.View != nil {
+			total += descriptor.View.Size()
+		}
+	}
+
+	result := make([]PriorityTierNodeSummary, 0, total)
+	for _, descriptor := range descriptors {
+		if descriptor.View == nil {
+			continue
+		}
+		label := platformPriorityTierLabel(descriptor.Kind, descriptor.Index)
+		descriptor.View.Range(func(h node.Hash) bool {
+			entry, ok := s.Pool.GetEntry(h)
+			if !ok || entry == nil {
+				return true
+			}
+			result = append(result, PriorityTierNodeSummary{
+				NodeSummary: s.nodeEntryToSummary(h, entry),
+				TierKey:     descriptor.Key,
+				TierKind:    descriptor.Kind,
+				TierLabel:   label,
+				TierIndex:   descriptor.Index,
+			})
+			return true
+		})
+	}
+	return result, nil
 }
 
 // PreviewFilter returns nodes matching the given filter spec.

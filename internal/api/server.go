@@ -79,9 +79,12 @@ func NewServerWithAddress(
 		authed.Handle("GET /api/v1/platforms", HandleListPlatforms(cp))
 		authed.Handle("POST /api/v1/platforms", HandleCreatePlatform(cp))
 		authed.Handle("POST /api/v1/platforms/preview-filter", HandlePreviewFilter(cp))
+		authed.Handle("POST /api/v1/platforms/preview-priority-tiers", HandlePreviewPriorityTiers(cp))
 		authed.Handle("GET /api/v1/platforms/{id}", HandleGetPlatform(cp))
 		authed.Handle("PATCH /api/v1/platforms/{id}", HandleUpdatePlatform(cp))
 		authed.Handle("DELETE /api/v1/platforms/{id}", HandleDeletePlatform(cp))
+		authed.Handle("GET /api/v1/platforms/{id}/priority-tiers/views", HandleListPlatformPriorityTierViews(cp))
+		authed.Handle("GET /api/v1/platforms/{id}/priority-tiers/{tier_key}/nodes", HandleListPlatformPriorityTierNodes(cp))
 		authed.Handle("POST /api/v1/platforms/{id}/actions/reset-to-default", HandleResetPlatform(cp))
 		authed.Handle("POST /api/v1/platforms/{id}/actions/rebuild-routable-view", HandleRebuildPlatform(cp))
 

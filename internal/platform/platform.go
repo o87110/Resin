@@ -32,6 +32,7 @@ type Platform struct {
 	RegexFilters        []*regexp.Regexp
 	ExcludeRegexFilters []*regexp.Regexp
 	RegionFilters       []string // lowercase ISO codes, supports negation "!xx"
+	PriorityTiers       []*PriorityTier
 
 	// Other config fields.
 	StickyTTLNs                      int64
@@ -43,8 +44,9 @@ type Platform struct {
 
 	// Routable view & its lock.
 	// viewMu serializes both FullRebuild and NotifyDirty.
-	view   *RoutableView
-	viewMu sync.Mutex
+	view         *RoutableView
+	fallbackView *RoutableView
+	viewMu       sync.Mutex
 }
 
 // NewPlatform creates a Platform with an empty routable view.
@@ -66,12 +68,30 @@ func NewPlatformWithExclude(
 		ExcludeRegexFilters: excludeRegexFilters,
 		RegionFilters:       regionFilters,
 		view:                NewRoutableView(),
+		fallbackView:        NewRoutableView(),
 	}
 }
 
 // View returns the platform's routable view as a read-only interface.
 // External callers cannot Add/Remove/Clear — only FullRebuild and NotifyDirty can mutate.
 func (p *Platform) View() ReadOnlyView {
+	return p.view
+}
+
+// RoutingView returns the highest-priority non-empty routing view.
+// When no explicit priority tiers are configured, it falls back to the full platform view.
+func (p *Platform) RoutingView() ReadOnlyView {
+	if len(p.PriorityTiers) == 0 {
+		return p.view
+	}
+	for _, tier := range p.PriorityTiers {
+		if tier != nil && tier.view.Size() > 0 {
+			return tier.view
+		}
+	}
+	if p.fallbackView.Size() > 0 {
+		return p.fallbackView
+	}
 	return p.view
 }
 
@@ -86,8 +106,10 @@ func (p *Platform) FullRebuild(
 	defer p.viewMu.Unlock()
 
 	p.view.Clear()
+	p.clearPriorityViews()
 	poolRange(func(h node.Hash, entry *node.NodeEntry) bool {
 		if p.evaluateNode(entry, subLookup, geoLookup) {
+			p.assignPriorityView(h, entry, subLookup, geoLookup)
 			p.view.Add(h)
 		}
 		return true
@@ -108,13 +130,16 @@ func (p *Platform) NotifyDirty(
 	entry, ok := getEntry(h)
 	if !ok {
 		// Node was deleted from pool.
+		p.removePriorityViews(h)
 		p.view.Remove(h)
 		return
 	}
 
 	if p.evaluateNode(entry, subLookup, geoLookup) {
+		p.assignPriorityView(h, entry, subLookup, geoLookup)
 		p.view.Add(h)
 	} else {
+		p.removePriorityViews(h)
 		p.view.Remove(h)
 	}
 }
@@ -194,4 +219,46 @@ func MatchRegionFilter(region string, filters []string) bool {
 		return false
 	}
 	return true
+}
+
+func (p *Platform) clearPriorityViews() {
+	if p.fallbackView != nil {
+		p.fallbackView.Clear()
+	}
+	for _, tier := range p.PriorityTiers {
+		if tier != nil && tier.view != nil {
+			tier.view.Clear()
+		}
+	}
+}
+
+func (p *Platform) removePriorityViews(h node.Hash) {
+	if p.fallbackView != nil {
+		p.fallbackView.Remove(h)
+	}
+	for _, tier := range p.PriorityTiers {
+		if tier != nil && tier.view != nil {
+			tier.view.Remove(h)
+		}
+	}
+}
+
+func (p *Platform) assignPriorityView(
+	h node.Hash,
+	entry *node.NodeEntry,
+	subLookup node.SubLookupFunc,
+	geoLookup GeoLookupFunc,
+) {
+	if len(p.PriorityTiers) == 0 {
+		return
+	}
+
+	p.removePriorityViews(h)
+	for _, tier := range p.PriorityTiers {
+		if tier != nil && tier.matches(entry, subLookup, geoLookup) {
+			tier.view.Add(h)
+			return
+		}
+	}
+	p.fallbackView.Add(h)
 }

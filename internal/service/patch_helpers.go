@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/Resinat/Resin/internal/model"
 )
 
 type mergePatch map[string]any
@@ -92,6 +94,28 @@ func (p mergePatch) optionalStringSlice(field string) ([]string, bool, *ServiceE
 			return nil, true, invalidArg(fmt.Sprintf("%s[%d]: must be a string", field, i))
 		}
 		value[i] = itemStr
+	}
+	return value, true, nil
+}
+
+func (p mergePatch) optionalPriorityTierSlice(field string) ([]model.PlatformPriorityTier, bool, *ServiceError) {
+	raw, ok := p[field]
+	if !ok {
+		return nil, false, nil
+	}
+	arr, ok := raw.([]any)
+	if !ok {
+		return nil, true, invalidArg(fmt.Sprintf("%s: must be an array", field))
+	}
+	value := make([]model.PlatformPriorityTier, len(arr))
+	for i, item := range arr {
+		data, err := json.Marshal(item)
+		if err != nil {
+			return nil, true, invalidArg(fmt.Sprintf("%s[%d]: invalid value", field, i))
+		}
+		if err := json.Unmarshal(data, &value[i]); err != nil {
+			return nil, true, invalidArg(fmt.Sprintf("%s[%d]: %s", field, i, err.Error()))
+		}
 	}
 	return value, true, nil
 }

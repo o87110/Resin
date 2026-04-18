@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -151,6 +152,15 @@ func decodeJSONMap(t *testing.T, rec *httptest.ResponseRecorder) map[string]any 
 		t.Fatalf("unmarshal body: %v body=%q", err, rec.Body.String())
 	}
 	return m
+}
+
+func decodeJSONAny(t *testing.T, rec *httptest.ResponseRecorder) any {
+	t.Helper()
+	var value any
+	if err := json.Unmarshal(rec.Body.Bytes(), &value); err != nil {
+		t.Fatalf("unmarshal body: %v body=%q", err, rec.Body.String())
+	}
+	return value
 }
 
 func assertErrorCode(t *testing.T, rec *httptest.ResponseRecorder, code string) {
@@ -926,6 +936,62 @@ func TestAPIContract_PlatformStickyTTLMustBePositive(t *testing.T) {
 	}
 }
 
+func TestAPIContract_PlatformPriorityTiersValidation(t *testing.T) {
+	srv, _, _ := newControlPlaneTestServer(t)
+
+	rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms", map[string]any{
+		"name": "priority-tier-create-invalid",
+		"priority_tiers": []map[string]any{
+			{},
+		},
+	}, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create invalid priority_tiers status: got %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	assertErrorCode(t, rec, "INVALID_ARGUMENT")
+
+	rec = doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms", map[string]any{
+		"name": "priority-tier-invalid-regex",
+		"priority_tiers": []map[string]any{
+			{
+				"regex_filters": []string{"(broken"},
+			},
+		},
+	}, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create invalid priority_tier regex status: got %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	assertErrorCode(t, rec, "INVALID_ARGUMENT")
+
+	tooManyTiers := make([]map[string]any, 0, 9)
+	for i := 0; i < 9; i++ {
+		tooManyTiers = append(tooManyTiers, map[string]any{
+			"regex_filters": []string{fmt.Sprintf("tier-%d", i)},
+		})
+	}
+
+	platformID := mustCreatePlatform(t, srv, "priority-tier-patch-target")
+	rec = doJSONRequest(t, srv, http.MethodPatch, "/api/v1/platforms/"+platformID, map[string]any{
+		"priority_tiers": tooManyTiers,
+	}, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("patch invalid priority_tiers status: got %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	assertErrorCode(t, rec, "INVALID_ARGUMENT")
+
+	rec = doJSONRequest(t, srv, http.MethodPatch, "/api/v1/platforms/"+platformID, map[string]any{
+		"priority_tiers": []map[string]any{
+			{
+				"region_filters": []string{"US"},
+			},
+		},
+	}, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("patch invalid priority_tier region status: got %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	assertErrorCode(t, rec, "INVALID_ARGUMENT")
+}
+
 func TestAPIContract_PlatformEmptyAccountBehavior(t *testing.T) {
 	srv, _, _ := newControlPlaneTestServer(t)
 
@@ -1062,6 +1128,15 @@ func TestAPIContract_PlatformExcludeRegexFilters(t *testing.T) {
 		"name":                  "exclude-regex-platform",
 		"regex_filters":         []string{"residential"},
 		"exclude_regex_filters": []string{"relay"},
+		"priority_tiers": []map[string]any{
+			{
+				"regex_filters": []string{"direct"},
+			},
+			{
+				"exclude_regex_filters": []string{"relay"},
+				"region_filters":        []string{"hk"},
+			},
+		},
 	}, true)
 	if createRec.Code != http.StatusCreated {
 		t.Fatalf("create platform status: got %d, want %d, body=%s", createRec.Code, http.StatusCreated, createRec.Body.String())
@@ -1074,6 +1149,21 @@ func TestAPIContract_PlatformExcludeRegexFilters(t *testing.T) {
 	if !reflect.DeepEqual(createBody["exclude_regex_filters"], []any{"relay"}) {
 		t.Fatalf("create exclude_regex_filters = %v, want [relay]", createBody["exclude_regex_filters"])
 	}
+	expectedPriorityTiers := []any{
+		map[string]any{
+			"regex_filters":         []any{"direct"},
+			"exclude_regex_filters": []any{},
+			"region_filters":        []any{},
+		},
+		map[string]any{
+			"regex_filters":         []any{},
+			"exclude_regex_filters": []any{"relay"},
+			"region_filters":        []any{"hk"},
+		},
+	}
+	if !reflect.DeepEqual(createBody["priority_tiers"], expectedPriorityTiers) {
+		t.Fatalf("create priority_tiers = %v, want %v", createBody["priority_tiers"], expectedPriorityTiers)
+	}
 
 	getRec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/platforms/"+platformID, nil, true)
 	if getRec.Code != http.StatusOK {
@@ -1082,6 +1172,9 @@ func TestAPIContract_PlatformExcludeRegexFilters(t *testing.T) {
 	getBody := decodeJSONMap(t, getRec)
 	if !reflect.DeepEqual(getBody["exclude_regex_filters"], []any{"relay"}) {
 		t.Fatalf("get exclude_regex_filters = %v, want [relay]", getBody["exclude_regex_filters"])
+	}
+	if !reflect.DeepEqual(getBody["priority_tiers"], expectedPriorityTiers) {
+		t.Fatalf("get priority_tiers = %v, want %v", getBody["priority_tiers"], expectedPriorityTiers)
 	}
 
 	listRec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/platforms?keyword=exclude-regex-platform", nil, true)
@@ -1103,9 +1196,17 @@ func TestAPIContract_PlatformExcludeRegexFilters(t *testing.T) {
 	if !reflect.DeepEqual(item["exclude_regex_filters"], []any{"relay"}) {
 		t.Fatalf("list exclude_regex_filters = %v, want [relay]", item["exclude_regex_filters"])
 	}
+	if !reflect.DeepEqual(item["priority_tiers"], expectedPriorityTiers) {
+		t.Fatalf("list priority_tiers = %v, want %v", item["priority_tiers"], expectedPriorityTiers)
+	}
 
 	patchRec := doJSONRequest(t, srv, http.MethodPatch, "/api/v1/platforms/"+platformID, map[string]any{
 		"exclude_regex_filters": []string{"relay", "dedicated"},
+		"priority_tiers": []map[string]any{
+			{
+				"regex_filters": []string{"residential"},
+			},
+		},
 	}, true)
 	if patchRec.Code != http.StatusOK {
 		t.Fatalf("patch platform status: got %d, want %d, body=%s", patchRec.Code, http.StatusOK, patchRec.Body.String())
@@ -1113,6 +1214,16 @@ func TestAPIContract_PlatformExcludeRegexFilters(t *testing.T) {
 	patchBody := decodeJSONMap(t, patchRec)
 	if !reflect.DeepEqual(patchBody["exclude_regex_filters"], []any{"relay", "dedicated"}) {
 		t.Fatalf("patch exclude_regex_filters = %v, want [relay dedicated]", patchBody["exclude_regex_filters"])
+	}
+	expectedPatchedPriorityTiers := []any{
+		map[string]any{
+			"regex_filters":         []any{"residential"},
+			"exclude_regex_filters": []any{},
+			"region_filters":        []any{},
+		},
+	}
+	if !reflect.DeepEqual(patchBody["priority_tiers"], expectedPatchedPriorityTiers) {
+		t.Fatalf("patch priority_tiers = %v, want %v", patchBody["priority_tiers"], expectedPatchedPriorityTiers)
 	}
 
 	previewRec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms/preview-filter", map[string]any{
@@ -1140,6 +1251,289 @@ func TestAPIContract_PlatformExcludeRegexFilters(t *testing.T) {
 	if previewItem["node_hash"] != directHash.Hex() {
 		t.Fatalf("preview node_hash = %v, want %q", previewItem["node_hash"], directHash.Hex())
 	}
+}
+
+func TestAPIContract_PlatformPriorityTierViewsAndNodes(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("sub-tier-view", "Provider", "https://example.com/sub-tier-view", true, false)
+	cp.SubMgr.Register(sub)
+
+	seedNode := func(raw []byte, tags []string) node.Hash {
+		hash := node.HashFromRawOptions(raw)
+		cp.Pool.AddNodeFromSub(hash, raw, sub.ID)
+		sub.ManagedNodes().StoreNode(hash, subscription.ManagedNode{Tags: tags})
+		entry, ok := cp.Pool.GetEntry(hash)
+		if !ok {
+			t.Fatalf("seed node %s missing", hash.Hex())
+		}
+		entry.SetEgressIP(netip.MustParseAddr("1.2.3.4"))
+		entry.LatencyTable.LoadEntry("cloudflare.com", node.DomainLatencyStats{
+			Ewma:        50 * time.Millisecond,
+			LastUpdated: time.Now(),
+		})
+		ob := testutil.NewNoopOutbound()
+		entry.Outbound.Store(&ob)
+		cp.Pool.RecordResult(hash, true)
+		cp.Pool.NotifyNodeDirty(hash)
+		return hash
+	}
+
+	hResidential := seedNode([]byte(`{"type":"ss","server":"1.1.1.1","port":443}`), []string{"residential"})
+	hFast := seedNode([]byte(`{"type":"ss","server":"2.2.2.2","port":443}`), []string{"fast"})
+	hFallback := seedNode([]byte(`{"type":"ss","server":"3.3.3.3","port":443}`), []string{"fallback"})
+
+	createRec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms", map[string]any{
+		"name": "tier-view-platform",
+		"priority_tiers": []map[string]any{
+			{
+				"regex_filters": []string{"residential"},
+			},
+			{
+				"regex_filters": []string{"fast"},
+			},
+		},
+	}, true)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create platform status: got %d, want %d, body=%s", createRec.Code, http.StatusCreated, createRec.Body.String())
+	}
+	createBody := decodeJSONMap(t, createRec)
+	platformID, _ := createBody["id"].(string)
+	if platformID == "" {
+		t.Fatalf("create platform missing id: body=%s", createRec.Body.String())
+	}
+
+	viewsRec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/platforms/"+platformID+"/priority-tiers/views", nil, true)
+	if viewsRec.Code != http.StatusOK {
+		t.Fatalf("tier views status: got %d, want %d, body=%s", viewsRec.Code, http.StatusOK, viewsRec.Body.String())
+	}
+	viewsBody, ok := decodeJSONAny(t, viewsRec).([]any)
+	if !ok {
+		t.Fatalf("tier views body type: got %T", decodeJSONAny(t, viewsRec))
+	}
+	if len(viewsBody) != 3 {
+		t.Fatalf("tier views len = %d, want 3", len(viewsBody))
+	}
+	view0 := viewsBody[0].(map[string]any)
+	view1 := viewsBody[1].(map[string]any)
+	fallbackView := viewsBody[2].(map[string]any)
+	if view0["tier_key"] != "0" || view0["kind"] != "explicit" || view0["node_count"] != float64(1) {
+		t.Fatalf("view0 = %v", view0)
+	}
+	if view1["tier_key"] != "1" || view1["kind"] != "explicit" || view1["node_count"] != float64(1) {
+		t.Fatalf("view1 = %v", view1)
+	}
+	if fallbackView["tier_key"] != "fallback" || fallbackView["kind"] != "fallback" || fallbackView["node_count"] != float64(1) {
+		t.Fatalf("fallback view = %v", fallbackView)
+	}
+
+	tier0Rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/platforms/"+platformID+"/priority-tiers/0/nodes?limit=1&offset=0", nil, true)
+	if tier0Rec.Code != http.StatusOK {
+		t.Fatalf("tier0 nodes status: got %d, want %d, body=%s", tier0Rec.Code, http.StatusOK, tier0Rec.Body.String())
+	}
+	tier0Body := decodeJSONMap(t, tier0Rec)
+	tier0Items, ok := tier0Body["items"].([]any)
+	if !ok || len(tier0Items) != 1 {
+		t.Fatalf("tier0 items = %v", tier0Body["items"])
+	}
+	tier0Item := tier0Items[0].(map[string]any)
+	if tier0Item["node_hash"] != hResidential.Hex() {
+		t.Fatalf("tier0 node_hash = %v, want %q", tier0Item["node_hash"], hResidential.Hex())
+	}
+
+	fallbackRec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/platforms/"+platformID+"/priority-tiers/fallback/nodes", nil, true)
+	if fallbackRec.Code != http.StatusOK {
+		t.Fatalf("fallback nodes status: got %d, want %d, body=%s", fallbackRec.Code, http.StatusOK, fallbackRec.Body.String())
+	}
+	fallbackBody := decodeJSONMap(t, fallbackRec)
+	fallbackItems, ok := fallbackBody["items"].([]any)
+	if !ok || len(fallbackItems) != 1 {
+		t.Fatalf("fallback items = %v", fallbackBody["items"])
+	}
+	fallbackItem := fallbackItems[0].(map[string]any)
+	if fallbackItem["node_hash"] != hFallback.Hex() {
+		t.Fatalf("fallback node_hash = %v, want %q", fallbackItem["node_hash"], hFallback.Hex())
+	}
+
+	invalidRec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/platforms/"+platformID+"/priority-tiers/invalid/nodes", nil, true)
+	if invalidRec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid tier key status: got %d, want %d, body=%s", invalidRec.Code, http.StatusBadRequest, invalidRec.Body.String())
+	}
+	assertErrorCode(t, invalidRec, "INVALID_ARGUMENT")
+
+	missingPlatformID := "11111111-1111-1111-1111-111111111111"
+	missingViewsRec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/platforms/"+missingPlatformID+"/priority-tiers/views", nil, true)
+	if missingViewsRec.Code != http.StatusNotFound {
+		t.Fatalf("missing platform tier views status: got %d, want %d, body=%s", missingViewsRec.Code, http.StatusNotFound, missingViewsRec.Body.String())
+	}
+	assertErrorCode(t, missingViewsRec, "NOT_FOUND")
+
+	noTierRec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms", map[string]any{
+		"name": "platform-pool-only",
+	}, true)
+	if noTierRec.Code != http.StatusCreated {
+		t.Fatalf("create no-tier platform status: got %d, want %d, body=%s", noTierRec.Code, http.StatusCreated, noTierRec.Body.String())
+	}
+	noTierBody := decodeJSONMap(t, noTierRec)
+	noTierPlatformID, _ := noTierBody["id"].(string)
+	if noTierPlatformID == "" {
+		t.Fatalf("no-tier platform missing id: body=%s", noTierRec.Body.String())
+	}
+
+	poolViewsRec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/platforms/"+noTierPlatformID+"/priority-tiers/views", nil, true)
+	if poolViewsRec.Code != http.StatusOK {
+		t.Fatalf("platform_pool views status: got %d, want %d, body=%s", poolViewsRec.Code, http.StatusOK, poolViewsRec.Body.String())
+	}
+	poolViewsBody, ok := decodeJSONAny(t, poolViewsRec).([]any)
+	if !ok || len(poolViewsBody) != 1 {
+		t.Fatalf("platform_pool views = %v", decodeJSONAny(t, poolViewsRec))
+	}
+	poolView := poolViewsBody[0].(map[string]any)
+	if poolView["tier_key"] != "platform_pool" || poolView["kind"] != "platform_pool" || poolView["node_count"] != float64(3) {
+		t.Fatalf("platform_pool view = %v", poolView)
+	}
+
+	poolNodesRec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/platforms/"+noTierPlatformID+"/priority-tiers/platform_pool/nodes", nil, true)
+	if poolNodesRec.Code != http.StatusOK {
+		t.Fatalf("platform_pool nodes status: got %d, want %d, body=%s", poolNodesRec.Code, http.StatusOK, poolNodesRec.Body.String())
+	}
+	poolNodesBody := decodeJSONMap(t, poolNodesRec)
+	poolItems, ok := poolNodesBody["items"].([]any)
+	if !ok || len(poolItems) != 3 {
+		t.Fatalf("platform_pool items = %v", poolNodesBody["items"])
+	}
+	seen := map[string]bool{}
+	for _, raw := range poolItems {
+		item := raw.(map[string]any)
+		seen[item["node_hash"].(string)] = true
+	}
+	if !seen[hResidential.Hex()] || !seen[hFast.Hex()] || !seen[hFallback.Hex()] {
+		t.Fatalf("platform_pool node set = %v", seen)
+	}
+}
+
+func TestAPIContract_PreviewPlatformPriorityTiers(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("sub-tier-preview", "Provider", "https://example.com/sub-tier-preview", true, false)
+	cp.SubMgr.Register(sub)
+
+	seedNode := func(raw []byte, tags []string, ip string) node.Hash {
+		hash := node.HashFromRawOptions(raw)
+		cp.Pool.AddNodeFromSub(hash, raw, sub.ID)
+		sub.ManagedNodes().StoreNode(hash, subscription.ManagedNode{Tags: tags})
+		entry, ok := cp.Pool.GetEntry(hash)
+		if !ok {
+			t.Fatalf("seed node %s missing", hash.Hex())
+		}
+		entry.SetEgressIP(netip.MustParseAddr(ip))
+		entry.LatencyTable.LoadEntry("cloudflare.com", node.DomainLatencyStats{
+			Ewma:        50 * time.Millisecond,
+			LastUpdated: time.Now(),
+		})
+		ob := testutil.NewNoopOutbound()
+		entry.Outbound.Store(&ob)
+		cp.Pool.RecordResult(hash, true)
+		cp.Pool.NotifyNodeDirty(hash)
+		return hash
+	}
+
+	hResidential := seedNode([]byte(`{"type":"ss","server":"4.4.4.4","port":443}`), []string{"residential"}, "1.2.3.7")
+	hFast := seedNode([]byte(`{"type":"ss","server":"5.5.5.5","port":443}`), []string{"fast"}, "1.2.3.8")
+	hFallback := seedNode([]byte(`{"type":"ss","server":"6.6.6.6","port":443}`), []string{"fallback"}, "1.2.3.9")
+
+	createRec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms", map[string]any{
+		"name": "tier-preview-platform",
+		"priority_tiers": []map[string]any{
+			{"regex_filters": []string{"residential"}},
+			{"regex_filters": []string{"fast"}},
+		},
+	}, true)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create platform status: got %d, want %d, body=%s", createRec.Code, http.StatusCreated, createRec.Body.String())
+	}
+	createBody := decodeJSONMap(t, createRec)
+	platformID, _ := createBody["id"].(string)
+	if platformID == "" {
+		t.Fatalf("create platform missing id: body=%s", createRec.Body.String())
+	}
+
+	savedOverallRec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms/preview-priority-tiers", map[string]any{
+		"platform_id": platformID,
+	}, true)
+	if savedOverallRec.Code != http.StatusOK {
+		t.Fatalf("saved overall preview status: got %d, want %d, body=%s", savedOverallRec.Code, http.StatusOK, savedOverallRec.Body.String())
+	}
+	savedOverallBody := decodeJSONMap(t, savedOverallRec)
+	savedOverallItems, ok := savedOverallBody["items"].([]any)
+	if !ok || len(savedOverallItems) != 3 {
+		t.Fatalf("saved overall items = %v", savedOverallBody["items"])
+	}
+	item0 := savedOverallItems[0].(map[string]any)
+	item1 := savedOverallItems[1].(map[string]any)
+	item2 := savedOverallItems[2].(map[string]any)
+	if item0["node_hash"] != hResidential.Hex() || item0["tier_key"] != "0" || item0["tier_kind"] != "explicit" || item0["tier_index"] != float64(0) {
+		t.Fatalf("saved overall item0 = %v", item0)
+	}
+	if item1["node_hash"] != hFast.Hex() || item1["tier_key"] != "1" || item1["tier_kind"] != "explicit" || item1["tier_index"] != float64(1) {
+		t.Fatalf("saved overall item1 = %v", item1)
+	}
+	if item2["node_hash"] != hFallback.Hex() || item2["tier_key"] != "fallback" || item2["tier_kind"] != "fallback" || item2["tier_index"] != float64(-1) {
+		t.Fatalf("saved overall item2 = %v", item2)
+	}
+
+	draftSingleRec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms/preview-priority-tiers", map[string]any{
+		"platform_spec": map[string]any{
+			"priority_tiers": []map[string]any{
+				{"regex_filters": []string{"residential"}},
+				{"regex_filters": []string{"fast"}},
+			},
+		},
+		"tier_key": "0",
+	}, true)
+	if draftSingleRec.Code != http.StatusOK {
+		t.Fatalf("draft single preview status: got %d, want %d, body=%s", draftSingleRec.Code, http.StatusOK, draftSingleRec.Body.String())
+	}
+	draftSingleBody := decodeJSONMap(t, draftSingleRec)
+	draftSingleItems, ok := draftSingleBody["items"].([]any)
+	if !ok || len(draftSingleItems) != 1 {
+		t.Fatalf("draft single items = %v", draftSingleBody["items"])
+	}
+	draftSingleItem := draftSingleItems[0].(map[string]any)
+	if draftSingleItem["node_hash"] != hResidential.Hex() || draftSingleItem["tier_key"] != "0" || draftSingleItem["tier_kind"] != "explicit" {
+		t.Fatalf("draft single item = %v", draftSingleItem)
+	}
+
+	poolDraftRec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms/preview-priority-tiers", map[string]any{
+		"platform_spec": map[string]any{},
+	}, true)
+	if poolDraftRec.Code != http.StatusOK {
+		t.Fatalf("platform_pool draft preview status: got %d, want %d, body=%s", poolDraftRec.Code, http.StatusOK, poolDraftRec.Body.String())
+	}
+	poolDraftBody := decodeJSONMap(t, poolDraftRec)
+	poolDraftItems, ok := poolDraftBody["items"].([]any)
+	if !ok || len(poolDraftItems) != 3 {
+		t.Fatalf("platform_pool draft items = %v", poolDraftBody["items"])
+	}
+	for _, raw := range poolDraftItems {
+		item := raw.(map[string]any)
+		if item["tier_key"] != "platform_pool" || item["tier_kind"] != "platform_pool" || item["tier_index"] != float64(-1) {
+			t.Fatalf("platform_pool draft item = %v", item)
+		}
+	}
+
+	invalidTierRec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms/preview-priority-tiers", map[string]any{
+		"platform_spec": map[string]any{
+			"priority_tiers": []map[string]any{
+				{"regex_filters": []string{"residential"}},
+			},
+		},
+		"tier_key": "invalid",
+	}, true)
+	if invalidTierRec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid preview tier key status: got %d, want %d, body=%s", invalidTierRec.Code, http.StatusBadRequest, invalidTierRec.Body.String())
+	}
+	assertErrorCode(t, invalidTierRec, "INVALID_ARGUMENT")
 }
 
 func TestAPIContract_SystemDefaultConfigSnapshot(t *testing.T) {
@@ -1269,6 +1663,14 @@ func TestAPIContract_ModuleAndActionEndpoints(t *testing.T) {
 	}, true)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("preview-filter invalid platform_id status: got %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	assertErrorCode(t, rec, "INVALID_ARGUMENT")
+
+	rec = doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms/preview-priority-tiers", map[string]any{
+		"platform_id": "not-a-uuid",
+	}, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("preview-priority-tiers invalid platform_id status: got %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
 	assertErrorCode(t, rec, "INVALID_ARGUMENT")
 

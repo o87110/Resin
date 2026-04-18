@@ -11,11 +11,19 @@ type Platform struct {
 	RegexFilters                     []string
 	ExcludeRegexFilters              []string
 	RegionFilters                    []string
+	PriorityTiers                    []PlatformPriorityTier
 	ReverseProxyMissAction           string `json:"reverse_proxy_miss_action"`
 	ReverseProxyEmptyAccountBehavior string `json:"reverse_proxy_empty_account_behavior"`
 	ReverseProxyFixedAccountHeader   string `json:"reverse_proxy_fixed_account_header"`
 	AllocationPolicy                 string `json:"allocation_policy"`
 	UpdatedAtNs                      int64  `json:"updated_at_ns"`
+}
+
+// PlatformPriorityTier defines one ordered priority layer inside a platform.
+type PlatformPriorityTier struct {
+	RegexFilters        []string `json:"regex_filters"`
+	ExcludeRegexFilters []string `json:"exclude_regex_filters"`
+	RegionFilters       []string `json:"region_filters"`
 }
 
 // Subscription represents a node subscription source.

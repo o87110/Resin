@@ -24,6 +24,7 @@ const (
 	stateVersionAddFixedAccountHeader   = 3
 	stateVersionNormalizeMissAction     = 4
 	stateVersionAddExcludeRegexFilters  = 5
+	stateVersionAddPriorityTiers        = 6
 	stateLegacyBaselineVersion          = stateVersionAddFixedAccountHeader
 )
 
@@ -109,8 +110,14 @@ func prepareLegacyStateBaseline(db *sql.DB, driver migratedb.Driver) error {
 	if err != nil {
 		return err
 	}
+	hasPriorityTiers, err := hasTableColumn(db, "platforms", "priority_tiers_json")
+	if err != nil {
+		return err
+	}
 
 	switch {
+	case hasEmptyBehavior && hasFixedHeader && hasExcludeRegexFilters && hasPriorityTiers:
+		return setMigrationVersion(driver, stateVersionAddPriorityTiers)
 	case hasEmptyBehavior && hasFixedHeader && hasExcludeRegexFilters:
 		return setMigrationVersion(driver, stateVersionAddExcludeRegexFilters)
 	case hasEmptyBehavior && hasFixedHeader:

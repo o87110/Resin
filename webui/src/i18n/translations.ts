@@ -271,6 +271,12 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "节点标签排除正则规则（可选）": "Node tag exclude regex filters (optional)",
   "地区过滤规则": "Region filters",
   "地区过滤规则（可选）": "Region filters (optional)",
+  "平台包含正则规则": "Platform include regex filters",
+  "平台包含正则规则（可选）": "Platform include regex filters (optional)",
+  "平台排除正则规则": "Platform exclude regex filters",
+  "平台排除正则规则（可选）": "Platform exclude regex filters (optional)",
+  "平台地区过滤规则": "Platform region filters",
+  "平台地区过滤规则（可选）": "Platform region filters (optional)",
   "包含正则": "Include regex",
   "排除正则": "Exclude regex",
   "每行一条": "One per line",
@@ -383,7 +389,113 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "节点池趋势": "Node pool trend",
   "节点的网络出口、探测状态以及失败历史。":
     "Node network egress, probe status, and failure history.",
-  "节点分配策略": "Node allocation policy",
+  "节点优先级层（可选）": "Node priority tiers (optional)",
+  "平台内优先级分层（可选）": "In-platform priority tiers (optional)",
+  "节点优先级层最多 8 层": "Node priority tiers can contain at most 8 layers",
+  "层内策略": "Intra-tier policy",
+  "层内分配策略": "Intra-tier allocation policy",
+  "最多 8 层，按顺序命中；层内仍使用当前层内分配策略。":
+    "Up to 8 layers. Matching follows the configured order; nodes inside the selected layer still use the current intra-tier allocation policy.",
+  "先使用第一个非空优先级层；未命中任何显式层的节点会自动落入隐式最后一层。":
+    "Use the first non-empty priority layer. Nodes matching no explicit layer automatically fall back to an implicit final layer.",
+  "未配置优先级层时，将直接在整个平台候选集中按层内分配策略选点。":
+    "Without priority tiers, routing picks from the whole platform candidate pool using the intra-tier allocation policy.",
+  "只对已经被下方平台筛选规则选中的节点再次分层；路由时优先使用最前面的非空层。":
+    "Only nodes already selected by the platform filter rules below are tiered again here; routing always prefers the first non-empty tier.",
+  "先筛出属于平台的候选节点，再按这里的顺序决定先用哪一层；未命中任何显式层的节点会自动落入隐式最后一层。":
+    "First filter nodes into this platform, then use the order here to decide which tier is used first; nodes matching no explicit tier fall back to an implicit final tier.",
+  "平台基础筛选范围（哪些节点属于这个平台）": "Platform base filter scope (which nodes belong to this platform)",
+  "这里先决定哪些节点能进入当前平台；只有进入平台的节点，才会继续参与上方的优先级分层。":
+    "This section decides which nodes can enter the current platform; only those nodes will participate in the priority tiers above.",
+  "可以把这里理解成平台总候选池；上面的优先级层只是在这个候选池里面再决定先用哪一组节点。":
+    "You can treat this as the platform's total candidate pool; the priority tiers above only decide which group inside this pool is used first.",
+  "层级命中查看（基于已保存配置）": "Tier match viewer (saved config only)",
+  "逐层查看当前平台运行时命中的节点，便于验证优先级分层是否符合预期。":
+    "Inspect runtime node matches tier by tier to verify whether the current priority tiers behave as expected.",
+  "下方结果基于已保存配置，保存后刷新可查看最新命中。":
+    "The results below are based on the saved configuration. Save and refresh to view the latest matches.",
+  "当前没有可查看的层级命中结果": "No tier match results are currently available.",
+  "兜底层（未命中显式层）": "Fallback tier (no explicit tier matched)",
+  "当前已保存配置下，命中这个优先级层的候选节点。":
+    "Candidate nodes currently matching this explicit priority tier.",
+  "当前草稿配置下，命中这个优先级层的候选节点。":
+    "Candidate nodes matching this explicit priority tier in the current draft configuration.",
+  "当前已生效配置下，命中这个优先级层的候选节点。":
+    "Candidate nodes matching this explicit priority tier in the live configuration.",
+  "当前已保存配置下，未命中任何显式优先级层的兜底候选节点。":
+    "Fallback candidate nodes that currently match no explicit priority tier.",
+  "当前草稿配置下，未命中任何显式优先级层的兜底候选节点。":
+    "Fallback candidate nodes matching no explicit priority tier in the current draft configuration.",
+  "当前已生效配置下，未命中任何显式优先级层的兜底候选节点。":
+    "Fallback candidate nodes matching no explicit priority tier in the live configuration.",
+  "当前平台在未配置优先级层时的全部候选节点。":
+    "All candidate nodes for this platform when no priority tiers are configured.",
+  "当前草稿配置下，未配置优先级层时的平台全部候选节点。":
+    "All candidate nodes for this platform with the current draft configuration when no priority tiers are configured.",
+  "当前已生效配置下，未配置优先级层时的平台全部候选节点。":
+    "All candidate nodes for this platform in the live configuration when no priority tiers are configured.",
+  "预览草稿": "Preview draft",
+  "预览节点": "Preview nodes",
+  "查看节点": "View nodes",
+  "草稿": "Draft",
+  "已生效": "Live",
+  "整体预览": "Overall preview",
+  "整体查看（基于已保存配置）": "Overall viewer (saved config)",
+  "整体预览（基于草稿配置）": "Overall preview (draft config)",
+  "按优先级顺序展示当前已保存配置下的全部层级命中结果。":
+    "Show all tier matches from the saved configuration in priority order.",
+  "按优先级顺序展示当前草稿配置下的全部层级命中结果。":
+    "Show all tier matches from the current draft configuration in priority order.",
+  "按优先级顺序展示当前已生效配置下的全部层级命中结果。":
+    "Show all tier matches from the live configuration in priority order.",
+  "共 {{count}} 个节点，显示该分组当前完整命中结果。":
+    "{{count}} nodes in total, showing the current full match set for this group.",
+  "共 {{count}} 个节点，按优先级顺序展示完整命中结果。":
+    "{{count}} nodes in total, showing the full match set in priority order.",
+  "正在加载层级命中结果...": "Loading tier match results...",
+  "正在加载层级节点列表...": "Loading tier node list...",
+  "该分组当前没有命中节点": "This group currently has no matched nodes.",
+  "所属层级": "Tier",
+  "所属层级筛选": "Tier filter",
+  "新增一层": "Add tier",
+  "优先级层 {{index}}": "Priority tier {{index}}",
+  "先命中的层先参与选点；节点命中多层时以最前面的层为准。":
+    "The first matched tier participates in routing first; when a node matches multiple tiers, the earliest one wins.",
+  "地区规则": "Region rules",
+  "上移": "Move up",
+  "下移": "Move down",
+  "每个优先级层至少要填写一条包含、排除或地区规则":
+    "Each priority tier must define at least one include, exclude, or region rule.",
+  "地区规则必须是两位小写国家码，可选 ! 前缀":
+    "Region rules must be lowercase two-letter country codes, optionally prefixed with !.",
+  "保存后可查看该层最新命中。": "Save to view the latest matches for this tier.",
+  "正在加载该层命中结果...": "Loading matches for this tier...",
+  "该层命中结果加载失败，请刷新重试。": "Failed to load matches for this tier. Refresh and try again.",
+  "当前没有该层已保存命中结果。": "No saved match result is currently available for this tier.",
+  "保存后可查看兜底层最新命中。": "Save to view the latest fallback tier matches.",
+  "正在加载兜底层命中结果...": "Loading fallback tier matches...",
+  "兜底层命中结果加载失败，请刷新重试。": "Failed to load fallback tier matches. Refresh and try again.",
+  "当前没有可查看的兜底命中结果。": "No fallback tier match result is currently available.",
+  "保存后可查看平台候选池最新命中。": "Save to view the latest platform pool matches.",
+  "正在加载平台候选池命中结果...": "Loading platform pool matches...",
+  "平台候选池结果加载失败，请刷新重试。": "Failed to load platform pool results. Refresh and try again.",
+  "当前没有可查看的平台候选池结果。": "No platform pool result is currently available.",
+  "兜底查看（基于已保存配置）": "Fallback viewer (saved config only)",
+  "候选池查看（基于已保存配置）": "Platform pool viewer (saved config only)",
+  "查看未命中任何显式优先级层的兜底候选节点。":
+    "View fallback candidate nodes that match no explicit priority tier.",
+  "查看未配置优先级层时的平台全部候选节点。":
+    "View all platform candidate nodes when no priority tiers are configured.",
+  "请先修正平台筛选与优先级分层中的错误后再预览。":
+    "Fix errors in platform filters and priority tiers before previewing.",
+  "当前显示的是已生效配置，不包含未保存修改。":
+    "The current view shows the live configuration and does not include unsaved changes.",
+  "草稿存在校验错误，当前已切换到已生效视图。":
+    "The draft contains validation errors, so the view has switched to the live configuration.",
+  "该草稿层尚未保存，暂无对应的已保存视图。":
+    "This draft tier has not been saved yet, so no saved view is available.",
+  "预览来源切换": "Preview source switch",
+  "{{count}} 个节点": "{{count}} nodes",
   "节点延迟分布": "Node latency distribution",
   "节点延迟分布（实时快照）": "Node latency distribution (realtime snapshot)",
   "节点延迟最大测试间隔": "Max node latency probe interval",
@@ -418,7 +530,7 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "默认反代空账号行为": "Default reverse-proxy empty-account behavior",
   "默认反代固定账号 Header": "Default reverse-proxy fixed account header",
   "默认反代固定账号 Header 列表": "Default reverse-proxy fixed account header list",
-  "默认节点分配策略": "Default node allocation policy",
+  "默认层内分配策略": "Default intra-tier allocation policy",
   "默认平台回退规则": "Default platform fallback rule",
   "默认粘性会话 TTL": "Default sticky session TTL",
   "默认正则黑名单": "Default regex blacklist",

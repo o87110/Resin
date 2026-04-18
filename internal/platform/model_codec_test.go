@@ -10,12 +10,18 @@ import (
 
 func TestBuildFromModel_Success(t *testing.T) {
 	mp := model.Platform{
-		ID:                               "plat-1",
-		Name:                             "Platform-1",
-		StickyTTLNs:                      3600,
-		RegexFilters:                     []string{`^us-.*$`},
-		ExcludeRegexFilters:              []string{`relay`},
-		RegionFilters:                    []string{"us", "jp"},
+		ID:                  "plat-1",
+		Name:                "Platform-1",
+		StickyTTLNs:         3600,
+		RegexFilters:        []string{`^us-.*$`},
+		ExcludeRegexFilters: []string{`relay`},
+		RegionFilters:       []string{"us", "jp"},
+		PriorityTiers: []model.PlatformPriorityTier{{
+			RegexFilters: []string{`^us-.*$`},
+		}, {
+			ExcludeRegexFilters: []string{`relay`},
+			RegionFilters:       []string{"jp"},
+		}},
 		ReverseProxyMissAction:           "REJECT",
 		ReverseProxyEmptyAccountBehavior: "FIXED_HEADER",
 		ReverseProxyFixedAccountHeader:   "x-account-id",
@@ -62,6 +68,9 @@ func TestBuildFromModel_Success(t *testing.T) {
 	if len(plat.RegionFilters) != 2 || plat.RegionFilters[0] != "us" || plat.RegionFilters[1] != "jp" {
 		t.Fatalf("region filters mismatch: %+v", plat.RegionFilters)
 	}
+	if len(plat.PriorityTiers) != 2 {
+		t.Fatalf("priority tier count mismatch: got %d want %d", len(plat.PriorityTiers), 2)
+	}
 }
 
 func TestBuildFromModel_InvalidRegex(t *testing.T) {
@@ -100,6 +109,23 @@ func TestBuildFromModel_InvalidRegionFilters(t *testing.T) {
 		t.Fatal("expected region decode error")
 	}
 	if !strings.Contains(err.Error(), "region_filters[0]") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestBuildFromModel_InvalidPriorityTiers(t *testing.T) {
+	_, err := BuildFromModel(model.Platform{
+		ID:                     "plat-1",
+		ReverseProxyMissAction: "TREAT_AS_EMPTY",
+		AllocationPolicy:       "BALANCED",
+		PriorityTiers: []model.PlatformPriorityTier{{
+			RegionFilters: []string{"US"},
+		}},
+	})
+	if err == nil {
+		t.Fatal("expected priority tier decode error")
+	}
+	if !strings.Contains(err.Error(), "priority_tiers[0].region_filters[0]") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

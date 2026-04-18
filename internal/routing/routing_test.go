@@ -26,13 +26,26 @@ const platName = "TestPlat"
 // makeEntry creates a node with outbound, egress IP, and latency filled in
 // so it passes platform.PassesFilter automatically.
 func makeRoutableNode(t testing.TB, pool *topology.GlobalNodePool, subMgr *topology.SubscriptionManager, raw string, ip string, latDomain string, latency time.Duration) node.Hash {
+	return makeTaggedRoutableNode(t, pool, subMgr, raw, []string{"tag"}, ip, latDomain, latency)
+}
+
+func makeTaggedRoutableNode(
+	t testing.TB,
+	pool *topology.GlobalNodePool,
+	subMgr *topology.SubscriptionManager,
+	raw string,
+	tags []string,
+	ip string,
+	latDomain string,
+	latency time.Duration,
+) node.Hash {
 	t.Helper()
 	rawOpts := json.RawMessage(raw)
 	h := node.HashFromRawOptions(rawOpts)
 
 	// Ensure sub has the node in managed nodes.
 	sub, _ := subMgr.Get("sub-1")
-	sub.ManagedNodes().StoreNode(h, subscription.ManagedNode{Tags: []string{"tag"}})
+	sub.ManagedNodes().StoreNode(h, subscription.ManagedNode{Tags: append([]string(nil), tags...)})
 
 	pool.AddNodeFromSub(h, rawOpts, "sub-1")
 
@@ -149,6 +162,111 @@ func TestRandomRoute_MultipleNodes(t *testing.T) {
 	// Both should appear (P2C with similar scores should distribute).
 	if len(seen) < 2 {
 		t.Log("Warning: only one node was selected in 100 iterations (may happen rarely)")
+	}
+}
+
+func TestRandomRoute_PriorityTiersPreferFirstNonEmptyTier(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(_ netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 10,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	platCfg, err := platform.BuildFromModel(model.Platform{
+		ID:   platID,
+		Name: platName,
+		PriorityTiers: []model.PlatformPriorityTier{{
+			RegexFilters: []string{"residential"},
+		}, {
+			RegexFilters: []string{"fast"},
+		}},
+		ReverseProxyMissAction: "TREAT_AS_EMPTY",
+		AllocationPolicy:       "BALANCED",
+	})
+	if err != nil {
+		t.Fatalf("BuildFromModel: %v", err)
+	}
+	platCfg.StickyTTLNs = int64(time.Hour)
+	pool.RegisterPlatform(platCfg)
+
+	sub := subscription.NewSubscription("sub-1", "Test Sub", "https://example.com", true, false)
+	subMgr.Register(sub)
+
+	h1 := makeTaggedRoutableNode(t, pool, subMgr, `{"priority":"1"}`, []string{"residential"}, "10.0.0.1", "cloudflare.com", 40*time.Millisecond)
+	h2 := makeTaggedRoutableNode(t, pool, subMgr, `{"priority":"2"}`, []string{"fast"}, "10.0.0.2", "cloudflare.com", 40*time.Millisecond)
+	_ = makeTaggedRoutableNode(t, pool, subMgr, `{"priority":"3"}`, []string{"fallback"}, "10.0.0.3", "cloudflare.com", 40*time.Millisecond)
+
+	router := makeRouter(pool, nil)
+	for i := 0; i < 20; i++ {
+		res, err := router.RouteRequest(platName, "", "example.com")
+		if err != nil {
+			t.Fatalf("route %d: %v", i, err)
+		}
+		if res.NodeHash != h1 {
+			t.Fatalf("expected highest-priority tier node %s, got %s", h1.Hex(), res.NodeHash.Hex())
+		}
+	}
+
+	entry, ok := pool.GetEntry(h1)
+	if !ok {
+		t.Fatalf("priority node %s missing", h1.Hex())
+	}
+	entry.CircuitOpenSince.Store(time.Now().UnixNano())
+	pool.NotifyNodeDirty(h1)
+
+	for i := 0; i < 20; i++ {
+		res, err := router.RouteRequest(platName, "", "example.com")
+		if err != nil {
+			t.Fatalf("fallback route %d: %v", i, err)
+		}
+		if res.NodeHash != h2 {
+			t.Fatalf("expected second-priority tier node %s after first tier drained, got %s", h2.Hex(), res.NodeHash.Hex())
+		}
+	}
+}
+
+func TestRandomRoute_PriorityTiersUseImplicitFallback(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(_ netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 10,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	platCfg, err := platform.BuildFromModel(model.Platform{
+		ID:   platID,
+		Name: platName,
+		PriorityTiers: []model.PlatformPriorityTier{{
+			RegexFilters: []string{"residential"},
+		}},
+		ReverseProxyMissAction: "TREAT_AS_EMPTY",
+		AllocationPolicy:       "BALANCED",
+	})
+	if err != nil {
+		t.Fatalf("BuildFromModel: %v", err)
+	}
+	platCfg.StickyTTLNs = int64(time.Hour)
+	pool.RegisterPlatform(platCfg)
+
+	sub := subscription.NewSubscription("sub-1", "Test Sub", "https://example.com", true, false)
+	subMgr.Register(sub)
+
+	h := makeTaggedRoutableNode(t, pool, subMgr, `{"priority":"fallback"}`, []string{"fallback"}, "10.0.0.9", "cloudflare.com", 40*time.Millisecond)
+	router := makeRouter(pool, nil)
+
+	for i := 0; i < 20; i++ {
+		res, err := router.RouteRequest(platName, "", "example.com")
+		if err != nil {
+			t.Fatalf("route %d: %v", i, err)
+		}
+		if res.NodeHash != h {
+			t.Fatalf("expected implicit fallback tier node %s, got %s", h.Hex(), res.NodeHash.Hex())
+		}
 	}
 }
 

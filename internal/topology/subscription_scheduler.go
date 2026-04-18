@@ -244,7 +244,6 @@ func (s *SubscriptionScheduler) UpdateSubscription(sub *subscription.Subscriptio
 		if sub.LastUpdatedNs.Load() > attemptStartedNs {
 			return
 		}
-
 		old := sub.ManagedNodes()
 
 		// Keep hashes inherit historical eviction state so refresh will not

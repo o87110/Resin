@@ -562,6 +562,257 @@ func TestCreatePlatform_ExcludeRegexFiltersApplyToRoutableView(t *testing.T) {
 	}
 }
 
+func TestCreatePlatform_PriorityTiersDriveRoutingView(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = closer.Close()
+	})
+
+	subMgr := topology.NewSubscriptionManager()
+	sub := subscription.NewSubscription("sub-1", "sub", "https://example.com/sub", true, false)
+	subMgr.Register(sub)
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	seedNode := func(raw string, tags []string, ip string) node.Hash {
+		hash := node.HashFromRawOptions([]byte(raw))
+		sub.ManagedNodes().StoreNode(hash, subscription.ManagedNode{Tags: tags})
+		entry := node.NewNodeEntry(hash, []byte(raw), time.Now(), 16)
+		entry.AddSubscriptionID(sub.ID)
+		entry.SetEgressIP(netip.MustParseAddr(ip))
+		entry.LatencyTable.LoadEntry("cloudflare.com", node.DomainLatencyStats{
+			Ewma:        50 * time.Millisecond,
+			LastUpdated: time.Now(),
+		})
+		ob := testutil.NewNoopOutbound()
+		entry.Outbound.Store(&ob)
+		pool.LoadNodeFromBootstrap(entry)
+		return hash
+	}
+
+	hResidential := seedNode(`{"type":"ss","server":"1.1.1.1","port":443}`, []string{"residential"}, "1.2.3.4")
+	hFast := seedNode(`{"type":"ss","server":"1.1.1.2","port":443}`, []string{"fast"}, "1.2.3.5")
+	_ = seedNode(`{"type":"ss","server":"1.1.1.3","port":443}`, []string{"fallback"}, "1.2.3.6")
+
+	runtimeCfg := &atomic.Pointer[config.RuntimeConfig]{}
+	runtimeCfg.Store(config.NewDefaultRuntimeConfig())
+
+	cp := &ControlPlaneService{
+		Engine:     engine,
+		Pool:       pool,
+		SubMgr:     subMgr,
+		RuntimeCfg: runtimeCfg,
+		EnvCfg: &config.EnvConfig{
+			DefaultPlatformStickyTTL:              30 * time.Minute,
+			DefaultPlatformRegexFilters:           []string{},
+			DefaultPlatformRegionFilters:          []string{},
+			DefaultPlatformReverseProxyMissAction: "TREAT_AS_EMPTY",
+			DefaultPlatformAllocationPolicy:       "BALANCED",
+		},
+	}
+
+	name := "priority-platform"
+	created, err := cp.CreatePlatform(CreatePlatformRequest{
+		Name: &name,
+		PriorityTiers: []model.PlatformPriorityTier{{
+			RegexFilters: []string{"residential"},
+		}, {
+			RegexFilters: []string{"fast"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePlatform: %v", err)
+	}
+	if len(created.PriorityTiers) != 2 {
+		t.Fatalf("created priority_tiers len = %d, want 2", len(created.PriorityTiers))
+	}
+
+	plat, ok := pool.GetPlatform(created.ID)
+	if !ok {
+		t.Fatalf("platform %s was not registered in pool", created.ID)
+	}
+	if got := plat.View().Size(); got != 3 {
+		t.Fatalf("new platform full view size = %d, want 3", got)
+	}
+	if got := plat.RoutingView(); got.Size() != 1 || !got.Contains(hResidential) {
+		t.Fatal("routing view should use first non-empty priority tier")
+	}
+
+	entry, ok := pool.GetEntry(hResidential)
+	if !ok {
+		t.Fatalf("priority node %s missing", hResidential.Hex())
+	}
+	entry.CircuitOpenSince.Store(time.Now().UnixNano())
+	pool.NotifyNodeDirty(hResidential)
+	if got := plat.RoutingView(); got.Size() != 1 || !got.Contains(hFast) {
+		t.Fatal("routing view should fall through to next non-empty priority tier")
+	}
+}
+
+func TestPlatformPriorityTierViewsAndNodes(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = closer.Close()
+	})
+
+	subMgr := topology.NewSubscriptionManager()
+	sub := subscription.NewSubscription("sub-1", "sub", "https://example.com/sub", true, false)
+	subMgr.Register(sub)
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	seedNode := func(raw string, tags []string, ip string) node.Hash {
+		hash := node.HashFromRawOptions([]byte(raw))
+		sub.ManagedNodes().StoreNode(hash, subscription.ManagedNode{Tags: tags})
+		entry := node.NewNodeEntry(hash, []byte(raw), time.Now(), 16)
+		entry.AddSubscriptionID(sub.ID)
+		entry.SetEgressIP(netip.MustParseAddr(ip))
+		entry.LatencyTable.LoadEntry("cloudflare.com", node.DomainLatencyStats{
+			Ewma:        50 * time.Millisecond,
+			LastUpdated: time.Now(),
+		})
+		ob := testutil.NewNoopOutbound()
+		entry.Outbound.Store(&ob)
+		pool.LoadNodeFromBootstrap(entry)
+		return hash
+	}
+
+	hResidential := seedNode(`{"type":"ss","server":"1.1.1.1","port":443}`, []string{"residential"}, "1.2.3.4")
+	hFast := seedNode(`{"type":"ss","server":"1.1.1.2","port":443}`, []string{"fast"}, "1.2.3.5")
+	hFallback := seedNode(`{"type":"ss","server":"1.1.1.3","port":443}`, []string{"fallback"}, "1.2.3.6")
+
+	runtimeCfg := &atomic.Pointer[config.RuntimeConfig]{}
+	runtimeCfg.Store(config.NewDefaultRuntimeConfig())
+
+	cp := &ControlPlaneService{
+		Engine:     engine,
+		Pool:       pool,
+		SubMgr:     subMgr,
+		RuntimeCfg: runtimeCfg,
+		EnvCfg: &config.EnvConfig{
+			DefaultPlatformStickyTTL:              30 * time.Minute,
+			DefaultPlatformRegexFilters:           []string{},
+			DefaultPlatformRegionFilters:          []string{},
+			DefaultPlatformReverseProxyMissAction: "TREAT_AS_EMPTY",
+			DefaultPlatformAllocationPolicy:       "BALANCED",
+		},
+	}
+
+	name := "priority-views-platform"
+	created, err := cp.CreatePlatform(CreatePlatformRequest{
+		Name: &name,
+		PriorityTiers: []model.PlatformPriorityTier{{
+			RegexFilters: []string{"residential"},
+		}, {
+			RegexFilters: []string{"fast"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePlatform: %v", err)
+	}
+
+	views, err := cp.ListPlatformPriorityTierViews(created.ID)
+	if err != nil {
+		t.Fatalf("ListPlatformPriorityTierViews: %v", err)
+	}
+	if len(views) != 3 {
+		t.Fatalf("tier views len = %d, want 3", len(views))
+	}
+	if views[0].TierKey != "0" || views[0].Kind != platform.PriorityTierViewKindExplicit || views[0].NodeCount != 1 {
+		t.Fatalf("tier view 0 = %+v", views[0])
+	}
+	if views[1].TierKey != "1" || views[1].Kind != platform.PriorityTierViewKindExplicit || views[1].NodeCount != 1 {
+		t.Fatalf("tier view 1 = %+v", views[1])
+	}
+	if views[2].TierKey != platform.PriorityTierViewKeyFallback || views[2].Kind != platform.PriorityTierViewKindFallback || views[2].NodeCount != 1 {
+		t.Fatalf("fallback tier view = %+v", views[2])
+	}
+
+	nodes, err := cp.ListPlatformPriorityTierNodes(created.ID, "0")
+	if err != nil {
+		t.Fatalf("ListPlatformPriorityTierNodes tier 0: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].NodeHash != hResidential.Hex() {
+		t.Fatalf("tier 0 nodes = %+v, want %s", nodes, hResidential.Hex())
+	}
+
+	nodes, err = cp.ListPlatformPriorityTierNodes(created.ID, "1")
+	if err != nil {
+		t.Fatalf("ListPlatformPriorityTierNodes tier 1: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].NodeHash != hFast.Hex() {
+		t.Fatalf("tier 1 nodes = %+v, want %s", nodes, hFast.Hex())
+	}
+
+	nodes, err = cp.ListPlatformPriorityTierNodes(created.ID, platform.PriorityTierViewKeyFallback)
+	if err != nil {
+		t.Fatalf("ListPlatformPriorityTierNodes fallback: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].NodeHash != hFallback.Hex() {
+		t.Fatalf("fallback nodes = %+v, want %s", nodes, hFallback.Hex())
+	}
+
+	if _, err := cp.ListPlatformPriorityTierNodes(created.ID, "invalid"); err == nil {
+		t.Fatal("expected invalid tier key error")
+	} else if svcErr, ok := err.(*ServiceError); !ok || svcErr.Code != "INVALID_ARGUMENT" {
+		t.Fatalf("invalid tier key error = %T %v", err, err)
+	}
+	if _, err := cp.ListPlatformPriorityTierViews("missing-platform"); err == nil {
+		t.Fatal("expected missing platform error")
+	} else if svcErr, ok := err.(*ServiceError); !ok || svcErr.Code != "NOT_FOUND" {
+		t.Fatalf("missing platform views error = %T %v", err, err)
+	}
+	if _, err := cp.ListPlatformPriorityTierNodes("missing-platform", "0"); err == nil {
+		t.Fatal("expected missing platform nodes error")
+	} else if svcErr, ok := err.(*ServiceError); !ok || svcErr.Code != "NOT_FOUND" {
+		t.Fatalf("missing platform nodes error = %T %v", err, err)
+	}
+
+	noTierName := "platform-pool-only"
+	noTierCreated, err := cp.CreatePlatform(CreatePlatformRequest{Name: &noTierName})
+	if err != nil {
+		t.Fatalf("CreatePlatform without tiers: %v", err)
+	}
+	poolViews, err := cp.ListPlatformPriorityTierViews(noTierCreated.ID)
+	if err != nil {
+		t.Fatalf("ListPlatformPriorityTierViews platform_pool: %v", err)
+	}
+	if len(poolViews) != 1 || poolViews[0].Kind != platform.PriorityTierViewKindPlatformPool || poolViews[0].TierKey != platform.PriorityTierViewKeyPlatformPool || poolViews[0].NodeCount != 3 {
+		t.Fatalf("platform pool view = %+v", poolViews)
+	}
+	poolNodes, err := cp.ListPlatformPriorityTierNodes(noTierCreated.ID, platform.PriorityTierViewKeyPlatformPool)
+	if err != nil {
+		t.Fatalf("ListPlatformPriorityTierNodes platform_pool: %v", err)
+	}
+	if len(poolNodes) != 3 {
+		t.Fatalf("platform pool nodes len = %d, want 3", len(poolNodes))
+	}
+}
+
 func TestCreatePlatform_RejectsReservedAPIName(t *testing.T) {
 	dir := t.TempDir()
 	engine, closer, err := state.PersistenceBootstrap(
@@ -955,6 +1206,7 @@ func TestDeletePlatform_DoesNotDecodeCorruptPersistedFiltersJSON(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
 		platformRow.StickyTTLNs,
 		platformRow.ReverseProxyMissAction,
 		string(platform.ReverseProxyEmptyAccountBehaviorAccountHeaderRule),
@@ -996,6 +1248,7 @@ func TestResetPlatformToDefault_SupportsBuiltInDefaultPlatform(t *testing.T) {
 		Name:                   platform.DefaultPlatformName,
 		StickyTTLNs:            int64(2 * time.Hour),
 		RegexFilters:           []string{`^legacy-`},
+		PriorityTiers:          []model.PlatformPriorityTier{{RegexFilters: []string{`legacy-tier`}}},
 		RegionFilters:          []string{"us"},
 		ReverseProxyMissAction: string(platform.ReverseProxyMissActionTreatAsEmpty),
 		AllocationPolicy:       string(platform.AllocationPolicyBalanced),
@@ -1003,6 +1256,11 @@ func TestResetPlatformToDefault_SupportsBuiltInDefaultPlatform(t *testing.T) {
 	}
 	if err := engine.UpsertPlatform(defaultRow); err != nil {
 		t.Fatalf("UpsertPlatform: %v", err)
+	}
+
+	initialPriorityTiers, err := platform.CompilePriorityTiers(defaultRow.PriorityTiers)
+	if err != nil {
+		t.Fatalf("CompilePriorityTiers: %v", err)
 	}
 
 	pool := topology.NewGlobalNodePool(topology.PoolConfig{
@@ -1018,6 +1276,7 @@ func TestResetPlatformToDefault_SupportsBuiltInDefaultPlatform(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		initialPriorityTiers,
 		defaultRow.StickyTTLNs,
 		defaultRow.ReverseProxyMissAction,
 		string(platform.ReverseProxyEmptyAccountBehaviorAccountHeaderRule),
@@ -1056,6 +1315,9 @@ func TestResetPlatformToDefault_SupportsBuiltInDefaultPlatform(t *testing.T) {
 	if len(resp.ExcludeRegexFilters) != 0 {
 		t.Fatalf("response exclude_regex_filters = %v, want empty", resp.ExcludeRegexFilters)
 	}
+	if len(resp.PriorityTiers) != 0 {
+		t.Fatalf("response priority_tiers = %v, want empty", resp.PriorityTiers)
+	}
 	if !reflect.DeepEqual(resp.RegionFilters, []string{"jp"}) {
 		t.Fatalf("response region_filters = %v, want %v", resp.RegionFilters, []string{"jp"})
 	}
@@ -1082,6 +1344,9 @@ func TestResetPlatformToDefault_SupportsBuiltInDefaultPlatform(t *testing.T) {
 	if len(stored.ExcludeRegexFilters) != 0 {
 		t.Fatalf("stored exclude_regex_filters = %v, want empty", stored.ExcludeRegexFilters)
 	}
+	if len(stored.PriorityTiers) != 0 {
+		t.Fatalf("stored priority_tiers = %v, want empty", stored.PriorityTiers)
+	}
 	if !reflect.DeepEqual(stored.RegionFilters, []string{"jp"}) {
 		t.Fatalf("stored region_filters = %v, want %v", stored.RegionFilters, []string{"jp"})
 	}
@@ -1107,6 +1372,9 @@ func TestResetPlatformToDefault_SupportsBuiltInDefaultPlatform(t *testing.T) {
 	}
 	if len(plat.ExcludeRegexFilters) != 0 {
 		t.Fatalf("pool exclude_regex_filters = %v, want empty", plat.ExcludeRegexFilters)
+	}
+	if len(plat.PriorityTiers) != 0 {
+		t.Fatalf("pool priority_tiers = %v, want empty", plat.PriorityTiers)
 	}
 	if !reflect.DeepEqual(plat.RegionFilters, []string{"jp"}) {
 		t.Fatalf("pool region_filters = %v, want %v", plat.RegionFilters, []string{"jp"})
@@ -1166,6 +1434,7 @@ func TestResetPlatformToDefault_DoesNotDecodeCorruptPersistedFiltersJSON(t *test
 	pool.RegisterPlatform(platform.NewConfiguredPlatform(
 		platformRow.ID,
 		platformRow.Name,
+		nil,
 		nil,
 		nil,
 		nil,

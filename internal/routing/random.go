@@ -19,8 +19,8 @@ var randomRouteRNGPool = sync.Pool{
 }
 
 // randomRoute selects a routable node using P2C with latency/load scoring.
-// It intentionally trusts Platform.View as the routable source of truth and
-// does not do extra pool scans/availability validation on the hot path.
+// It intentionally trusts Platform.RoutingView as the routable source of truth
+// and does not do extra pool scans/availability validation on the hot path.
 // Post-pick race handling (node removed right after selection) is handled by
 // the caller in RouteRequest.
 func randomRoute(
@@ -31,7 +31,7 @@ func randomRoute(
 	authorities []string,
 	p2cWindow time.Duration,
 ) (node.Hash, error) {
-	view := plat.View()
+	view := plat.RoutingView()
 	size := view.Size()
 	if size == 0 {
 		return node.Zero, ErrNoAvailableNodes

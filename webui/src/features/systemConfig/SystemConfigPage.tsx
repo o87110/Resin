@@ -809,7 +809,7 @@ export function SystemConfigPage() {
                       <Input readOnly disabled value={envBaseline.default_platform_sticky_ttl} />
                     </div>
                     <div className="field-group">
-                      <label className="field-label" style={{ margin: 0 }}>{t("默认节点分配策略")}</label>
+                      <label className="field-label" style={{ margin: 0 }}>{t("默认层内分配策略")}</label>
                       <Input readOnly disabled value={t(displayAllocationPolicy(envBaseline.default_platform_allocation_policy))} />
                     </div>
                     <div className="field-group">

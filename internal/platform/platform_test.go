@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/testutil"
 )
@@ -348,5 +349,176 @@ func TestPlatform_FullRebuild_ClearsOld(t *testing.T) {
 	}
 	if p.View().Contains(h2) {
 		t.Fatal("h2 should have been removed by rebuild")
+	}
+}
+
+func TestPlatform_RoutingView_UsesFirstNonEmptyPriorityTier(t *testing.T) {
+	plat, err := BuildFromModel(model.Platform{
+		ID: "p-tiered",
+		PriorityTiers: []model.PlatformPriorityTier{{
+			RegexFilters: []string{"residential"},
+		}, {
+			RegexFilters: []string{"fast"},
+		}},
+		ReverseProxyMissAction: "TREAT_AS_EMPTY",
+		AllocationPolicy:       "BALANCED",
+	})
+	if err != nil {
+		t.Fatalf("BuildFromModel: %v", err)
+	}
+
+	h1 := makeHash(`{"type":"ss","tier":1}`)
+	h2 := makeHash(`{"type":"ss","tier":2}`)
+	h3 := makeHash(`{"type":"ss","tier":3}`)
+	e1 := makeFullyRoutableEntry(h1, "sub1")
+	e2 := makeFullyRoutableEntry(h2, "sub1")
+	e3 := makeFullyRoutableEntry(h3, "sub1")
+
+	lookup := func(subID string, hash node.Hash) (string, bool, []string, bool) {
+		switch hash {
+		case h1:
+			return "TestSub", true, []string{"residential"}, true
+		case h2:
+			return "TestSub", true, []string{"fast"}, true
+		default:
+			return "TestSub", true, []string{"fallback"}, true
+		}
+	}
+
+	plat.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h1, e1)
+		fn(h2, e2)
+		fn(h3, e3)
+	}, lookup, usGeoLookup)
+
+	if plat.View().Size() != 3 {
+		t.Fatalf("full view size: got %d, want %d", plat.View().Size(), 3)
+	}
+	if plat.PriorityTiers[0].view.Size() != 1 || !plat.PriorityTiers[0].view.Contains(h1) {
+		t.Fatalf("tier 1 view mismatch: size=%d", plat.PriorityTiers[0].view.Size())
+	}
+	if plat.PriorityTiers[1].view.Size() != 1 || !plat.PriorityTiers[1].view.Contains(h2) {
+		t.Fatalf("tier 2 view mismatch: size=%d", plat.PriorityTiers[1].view.Size())
+	}
+	if plat.fallbackView.Size() != 1 || !plat.fallbackView.Contains(h3) {
+		t.Fatalf("fallback view mismatch: size=%d", plat.fallbackView.Size())
+	}
+
+	routingView := plat.RoutingView()
+	if routingView.Size() != 1 || !routingView.Contains(h1) {
+		t.Fatal("routing view should use first non-empty tier")
+	}
+
+	entryStore := map[node.Hash]*node.NodeEntry{h1: e1, h2: e2, h3: e3}
+	getEntry := func(hash node.Hash) (*node.NodeEntry, bool) {
+		entry, ok := entryStore[hash]
+		return entry, ok
+	}
+	e1.CircuitOpenSince.Store(time.Now().UnixNano())
+	plat.NotifyDirty(h1, getEntry, lookup, usGeoLookup)
+
+	routingView = plat.RoutingView()
+	if routingView.Size() != 1 || !routingView.Contains(h2) {
+		t.Fatal("routing view should fall through to next non-empty tier")
+	}
+}
+
+func TestPlatform_RoutingView_UsesImplicitFallbackTier(t *testing.T) {
+	plat, err := BuildFromModel(model.Platform{
+		ID: "p-fallback",
+		PriorityTiers: []model.PlatformPriorityTier{{
+			RegexFilters: []string{"residential"},
+		}},
+		ReverseProxyMissAction: "TREAT_AS_EMPTY",
+		AllocationPolicy:       "BALANCED",
+	})
+	if err != nil {
+		t.Fatalf("BuildFromModel: %v", err)
+	}
+
+	h := makeHash(`{"type":"ss","tier":"fallback"}`)
+	entry := makeFullyRoutableEntry(h, "sub1")
+	lookup := func(subID string, hash node.Hash) (string, bool, []string, bool) {
+		return "TestSub", true, []string{"other"}, true
+	}
+
+	plat.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, lookup, usGeoLookup)
+
+	if plat.PriorityTiers[0].view.Size() != 0 {
+		t.Fatalf("tier 1 should be empty, got %d", plat.PriorityTiers[0].view.Size())
+	}
+	if plat.fallbackView.Size() != 1 || !plat.fallbackView.Contains(h) {
+		t.Fatal("unmatched node should land in implicit fallback tier")
+	}
+	if !plat.RoutingView().Contains(h) {
+		t.Fatal("routing view should use implicit fallback tier when all explicit tiers are empty")
+	}
+}
+
+func TestPlatform_RoutingView_OverlapUsesFirstTierAndReorderChangesAssignment(t *testing.T) {
+	hOverlap := makeHash(`{"type":"ss","tier":"overlap"}`)
+	hFastOnly := makeHash(`{"type":"ss","tier":"fast-only"}`)
+	eOverlap := makeFullyRoutableEntry(hOverlap, "sub1")
+	eFastOnly := makeFullyRoutableEntry(hFastOnly, "sub1")
+
+	lookup := func(subID string, hash node.Hash) (string, bool, []string, bool) {
+		switch hash {
+		case hOverlap:
+			return "TestSub", true, []string{"residential", "fast"}, true
+		case hFastOnly:
+			return "TestSub", true, []string{"fast"}, true
+		default:
+			return "TestSub", true, []string{"fallback"}, true
+		}
+	}
+
+	build := func(tiers []model.PlatformPriorityTier) *Platform {
+		plat, err := BuildFromModel(model.Platform{
+			ID:                     "p-overlap",
+			PriorityTiers:          tiers,
+			ReverseProxyMissAction: "TREAT_AS_EMPTY",
+			AllocationPolicy:       "BALANCED",
+		})
+		if err != nil {
+			t.Fatalf("BuildFromModel: %v", err)
+		}
+		plat.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+			fn(hOverlap, eOverlap)
+			fn(hFastOnly, eFastOnly)
+		}, lookup, usGeoLookup)
+		return plat
+	}
+
+	residentialFirst := build([]model.PlatformPriorityTier{
+		{RegexFilters: []string{"residential"}},
+		{RegexFilters: []string{"fast"}},
+	})
+	if !residentialFirst.PriorityTiers[0].view.Contains(hOverlap) {
+		t.Fatal("overlap node should be assigned to first matching tier")
+	}
+	if residentialFirst.PriorityTiers[1].view.Contains(hOverlap) {
+		t.Fatal("overlap node must not appear in later matching tiers")
+	}
+	if residentialFirst.PriorityTiers[1].view.Size() != 1 || !residentialFirst.PriorityTiers[1].view.Contains(hFastOnly) {
+		t.Fatal("fast-only node should remain in second tier when first tier is residential")
+	}
+	if residentialFirst.RoutingView().Size() != 1 || !residentialFirst.RoutingView().Contains(hOverlap) {
+		t.Fatal("routing view should only expose the first non-empty tier")
+	}
+
+	fastFirst := build([]model.PlatformPriorityTier{
+		{RegexFilters: []string{"fast"}},
+		{RegexFilters: []string{"residential"}},
+	})
+	if !fastFirst.PriorityTiers[0].view.Contains(hOverlap) || !fastFirst.PriorityTiers[0].view.Contains(hFastOnly) {
+		t.Fatal("reordering tiers should move overlap node into the new first matching tier")
+	}
+	if fastFirst.PriorityTiers[1].view.Contains(hOverlap) {
+		t.Fatal("overlap node must still only appear in the earliest matching tier after reorder")
+	}
+	if fastFirst.RoutingView().Size() != 2 {
+		t.Fatalf("routing view size after reorder = %d, want 2", fastFirst.RoutingView().Size())
 	}
 }

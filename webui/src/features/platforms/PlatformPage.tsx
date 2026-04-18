@@ -32,6 +32,7 @@ import {
   toPlatformCreateInput,
   type PlatformFormValues,
 } from "./formModel";
+import { PriorityTierEditor } from "./PriorityTierEditor";
 import type { Platform } from "./types";
 
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
@@ -236,7 +237,7 @@ export function PlatformPage() {
 
       {createModalOpen ? (
         <div className="modal-overlay" role="dialog" aria-modal="true">
-          <Card className="modal-card">
+          <Card className="modal-card platform-modal-card">
             <div className="modal-header">
               <h3>{t("新建平台")}</h3>
               <Button variant="ghost" size="sm" onClick={() => setCreateModalOpen(false)}>
@@ -280,7 +281,7 @@ export function PlatformPage() {
 
               <div className="field-group">
                 <label className="field-label" htmlFor="create-policy">
-                  {t("节点分配策略")}
+                  {t("层内分配策略")}
                 </label>
                 <Select id="create-policy" {...createForm.register("allocation_policy")}>
                   {allocationPolicies.map((item) => (
@@ -288,12 +289,14 @@ export function PlatformPage() {
                       {t(allocationPolicyLabel[item])}
                     </option>
                   ))}
-                </Select>
-              </div>
+                  </Select>
+                </div>
 
-              <div className="field-group">
-                <label className="field-label" htmlFor="create-empty-account-behavior">
-                  {t("反向代理账号为空行为")}
+                <PriorityTierEditor form={createForm} />
+
+                <div className="field-group">
+                  <label className="field-label" htmlFor="create-empty-account-behavior">
+                    {t("反向代理账号为空行为")}
                 </label>
                 <Select id="create-empty-account-behavior" {...createForm.register("reverse_proxy_empty_account_behavior")}>
                   {emptyAccountBehaviors.map((item) => (
@@ -324,65 +327,86 @@ export function PlatformPage() {
                 </div>
               </div>
 
-              <div className="field-group">
-                <label className="field-label field-label-with-info" htmlFor="create-regex">
-                  <span>{t("节点标签包含正则规则（可选）")}</span>
-                  <span
-                    className="subscription-info-icon"
-                    title={t("匹配对象为 订阅名/tag；节点需满足全部包含规则。")}
-                    aria-label={t("匹配对象为 订阅名/tag；节点需满足全部包含规则。")}
-                    tabIndex={0}
-                  >
-                    <Info size={13} />
-                  </span>
-                </label>
-                <Textarea
-                  id="create-regex"
-                  rows={4}
-                  placeholder={t("每行一条，例如 .*(家宽|住宅).* 或 <订阅名>/.*")}
-                  {...createForm.register("regex_filters_text")}
-                />
-                <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
-                  {t("技巧：<订阅名>/.* 可筛选来自该订阅的节点。")}
-                </p>
+              <div className="platform-filter-section-head field-span-2">
+                <div>
+                  <label className="field-label field-label-with-info" style={{ marginBottom: 0 }}>
+                    <span>{t("平台基础筛选范围（哪些节点属于这个平台）")}</span>
+                    <span
+                      className="subscription-info-icon"
+                      title={t("这里先决定哪些节点能进入当前平台；只有进入平台的节点，才会继续参与上方的优先级分层。")}
+                      aria-label={t("这里先决定哪些节点能进入当前平台；只有进入平台的节点，才会继续参与上方的优先级分层。")}
+                      tabIndex={0}
+                    >
+                      <Info size={13} />
+                    </span>
+                  </label>
+                  <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
+                    {t("可以把这里理解成平台总候选池；上面的优先级层只是在这个候选池里面再决定先用哪一组节点。")}
+                  </p>
+                </div>
               </div>
 
-              <div className="field-group">
-                <label className="field-label field-label-with-info" htmlFor="create-exclude-regex">
-                  <span>{t("节点标签排除正则规则（可选）")}</span>
-                  <span
-                    className="subscription-info-icon"
-                    title={t("匹配对象为 订阅名/tag；命中任一排除规则的节点会被剔除。")}
-                    aria-label={t("匹配对象为 订阅名/tag；命中任一排除规则的节点会被剔除。")}
-                    tabIndex={0}
-                  >
-                    <Info size={13} />
-                  </span>
-                </label>
-                <Textarea
-                  id="create-exclude-regex"
-                  rows={4}
-                  placeholder={t("每行一条，例如 .*专线.* 或 .*中转.*")}
-                  {...createForm.register("exclude_regex_filters_text")}
-                />
-                <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
-                  {t("技巧：排除规则命中任一条即剔除该候选标签。")}
-                </p>
-              </div>
+              <div className="platform-filter-grid field-span-2">
+                <div className="field-group">
+                  <label className="field-label field-label-with-info" htmlFor="create-regex">
+                    <span>{t("平台包含正则规则（可选）")}</span>
+                    <span
+                      className="subscription-info-icon"
+                      title={t("匹配对象为 订阅名/tag；节点需满足全部包含规则。")}
+                      aria-label={t("匹配对象为 订阅名/tag；节点需满足全部包含规则。")}
+                      tabIndex={0}
+                    >
+                      <Info size={13} />
+                    </span>
+                  </label>
+                  <Textarea
+                    id="create-regex"
+                    rows={4}
+                    placeholder={t("每行一条，例如 .*(家宽|住宅).* 或 <订阅名>/.*")}
+                    {...createForm.register("regex_filters_text")}
+                  />
+                  <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
+                    {t("技巧：<订阅名>/.* 可筛选来自该订阅的节点。")}
+                  </p>
+                </div>
 
-              <div className="field-group">
-                <label className="field-label" htmlFor="create-region">
-                  {t("地区过滤规则（可选）")}
-                </label>
-                <Textarea
-                  id="create-region"
-                  rows={4}
-                  placeholder={t("每行一条，如 hk / us / !hk")}
-                  {...createForm.register("region_filters_text")}
-                />
-                <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
-                  {t("支持反选：以 ! 开头可排除地区（如 !hk）。可与正选混用，最终结果为“先正选再排除”。")}
-                </p>
+                <div className="field-group">
+                  <label className="field-label field-label-with-info" htmlFor="create-exclude-regex">
+                    <span>{t("平台排除正则规则（可选）")}</span>
+                    <span
+                      className="subscription-info-icon"
+                      title={t("匹配对象为 订阅名/tag；命中任一排除规则的节点会被剔除。")}
+                      aria-label={t("匹配对象为 订阅名/tag；命中任一排除规则的节点会被剔除。")}
+                      tabIndex={0}
+                    >
+                      <Info size={13} />
+                    </span>
+                  </label>
+                  <Textarea
+                    id="create-exclude-regex"
+                    rows={4}
+                    placeholder={t("每行一条，例如 .*专线.* 或 .*中转.*")}
+                    {...createForm.register("exclude_regex_filters_text")}
+                  />
+                  <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
+                    {t("技巧：排除规则命中任一条即剔除该候选标签。")}
+                  </p>
+                </div>
+
+                <div className="field-group">
+                  <label className="field-label" htmlFor="create-region">
+                    {t("平台地区过滤规则（可选）")}
+                  </label>
+                  <Textarea
+                    id="create-region"
+                    rows={4}
+                    placeholder={t("每行一条，如 hk / us / !hk")}
+                    {...createForm.register("region_filters_text")}
+                  />
+                  <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
+                    {t("支持反选：以 ! 开头可排除地区（如 !hk）。可与正选混用，最终结果为“先正选再排除”。")}
+                  </p>
+                </div>
               </div>
 
               <div className="detail-actions">
