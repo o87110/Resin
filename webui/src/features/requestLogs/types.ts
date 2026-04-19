@@ -1,3 +1,19 @@
+export type ConnectAttemptTraceItem = {
+  index: number;
+  node_hash: string;
+  node_tag: string;
+  egress_ip: string;
+  tier_kind: string;
+  tier_key: string;
+  tier_index: number;
+  same_ip_retry: boolean;
+  dial_timeout_ms: number;
+  duration_ms: number;
+  result: string;
+  resin_error: string;
+  upstream_stage: string;
+};
+
 export type RequestLogItem = {
   id: string;
   ts: string;
@@ -22,6 +38,9 @@ export type RequestLogItem = {
   upstream_err_msg: string;
   ingress_bytes: number;
   egress_bytes: number;
+  connect_attempt_count?: number;
+  connect_failover_used?: boolean;
+  connect_attempt_trace?: ConnectAttemptTraceItem[];
   payload_present: boolean;
   req_headers_len: number;
   req_body_len: number;

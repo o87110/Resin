@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/outbound"
 	"github.com/Resinat/Resin/internal/platform"
@@ -28,6 +29,7 @@ import (
 type proxyE2EEnv struct {
 	pool   *topology.GlobalNodePool
 	router *routing.Router
+	subMgr *topology.SubscriptionManager
 }
 
 func newProxyE2EEnv(t *testing.T) *proxyE2EEnv {
@@ -87,6 +89,7 @@ func newProxyE2EEnv(t *testing.T) *proxyE2EEnv {
 	return &proxyE2EEnv{
 		pool:   pool,
 		router: router,
+		subMgr: subMgr,
 	}
 }
 
@@ -106,6 +109,48 @@ func setProxyE2EOutboundDialFunc(
 	ob := &mockOutbound{dialFunc: dialFunc}
 	var wrapped adapter.Outbound = ob
 	entry.Outbound.Store(&wrapped)
+}
+
+func addProxyE2EBootstrapNode(
+	t *testing.T,
+	env *proxyE2EEnv,
+	raw string,
+	ip string,
+	latencyDomain string,
+	latency time.Duration,
+	dialFunc func(ctx context.Context, network string, dest M.Socksaddr) (net.Conn, error),
+) node.Hash {
+	t.Helper()
+
+	rawOpts := json.RawMessage(raw)
+	hash := node.HashFromRawOptions(rawOpts)
+	if env.subMgr == nil {
+		t.Fatal("proxy E2E env missing subscription manager")
+	}
+	sub, ok := env.subMgr.Get("sub-1")
+	if !ok {
+		t.Fatal("subscription sub-1 missing")
+	}
+	sub.ManagedNodes().StoreNode(hash, subscription.ManagedNode{Tags: []string{"tag"}})
+	entry := node.NewNodeEntry(hash, rawOpts, time.Now(), 16)
+	entry.AddSubscriptionID("sub-1")
+	if parsedIP, err := netip.ParseAddr(ip); err == nil {
+		entry.SetEgressIP(parsedIP)
+	} else {
+		t.Fatalf("parse bootstrap node ip %q: %v", ip, err)
+	}
+	if entry.LatencyTable == nil {
+		t.Fatal("bootstrap node latency table should be initialized")
+	}
+	entry.LatencyTable.Update(latencyDomain, latency, 10*time.Minute)
+	ob := &mockOutbound{dialFunc: dialFunc}
+	var wrapped adapter.Outbound = ob
+	entry.Outbound.Store(&wrapped)
+	entry.CircuitOpenSince.Store(0)
+
+	env.pool.LoadNodeFromBootstrap(entry)
+	env.pool.NotifyNodeDirty(hash)
+	return hash
 }
 
 func TestForwardProxy_E2EHTTPSuccess(t *testing.T) {
@@ -724,6 +769,215 @@ func TestForwardProxy_CONNECTTunnelSemantics(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("expected RecordResult call for CONNECT success")
+}
+
+func TestForwardProxy_CONNECTFailoverToSameIPCandidate(t *testing.T) {
+	env := newProxyE2EEnv(t)
+	emitter := newMockEventEmitter()
+	health := &mockHealthRecorder{}
+
+	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen target: %v", err)
+	}
+	defer targetLn.Close()
+
+	targetDone := make(chan struct{})
+	go func() {
+		defer close(targetDone)
+		conn, acceptErr := targetLn.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = io.Copy(conn, conn)
+	}()
+
+	primaryHash := node.HashFromRawOptions(json.RawMessage(`{"type":"stub","server":"127.0.0.1","server_port":1}`))
+	setProxyE2EOutboundDialFunc(t, env, func(context.Context, string, M.Socksaddr) (net.Conn, error) {
+		return nil, dialErr{}
+	})
+	backupHash := addProxyE2EBootstrapNode(
+		t,
+		env,
+		`{"type":"stub","server":"127.0.0.1","server_port":2}`,
+		"203.0.113.10",
+		"example.com",
+		25*time.Millisecond,
+		func(context.Context, string, M.Socksaddr) (net.Conn, error) {
+			return net.Dial("tcp", targetLn.Addr().String())
+		},
+	)
+
+	if err := env.router.UpsertLease(model.Lease{
+		PlatformID:     "plat-id",
+		Account:        "user",
+		NodeHash:       primaryHash.Hex(),
+		EgressIP:       "203.0.113.10",
+		CreatedAtNs:    time.Now().Add(-time.Minute).UnixNano(),
+		ExpiryNs:       time.Now().Add(time.Hour).UnixNano(),
+		LastAccessedNs: time.Now().UnixNano(),
+	}); err != nil {
+		t.Fatalf("UpsertLease: %v", err)
+	}
+	plan, err := env.router.BuildConnectRoutePlan("plat", "user", targetLn.Addr().String())
+	if err != nil {
+		t.Fatalf("BuildConnectRoutePlan: %v", err)
+	}
+	if len(plan.Candidates) < 2 {
+		t.Fatalf("expected at least 2 CONNECT candidates, got %d", len(plan.Candidates))
+	}
+
+	fp := NewForwardProxy(ForwardProxyConfig{
+		ProxyToken:  "tok",
+		AuthVersion: "V1",
+		Router:      env.router,
+		Pool:        env.pool,
+		Health:      health,
+		Events:      emitter,
+	})
+	proxySrv := httptest.NewServer(fp)
+	defer proxySrv.Close()
+
+	proxyAddr := strings.TrimPrefix(proxySrv.URL, "http://")
+	clientConn, err := net.Dial("tcp", proxyAddr)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer clientConn.Close()
+
+	targetAddr := targetLn.Addr().String()
+	req := fmt.Sprintf(
+		"CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: %s\r\n\r\n",
+		targetAddr,
+		targetAddr,
+		basicAuth("plat.user", "tok"),
+	)
+	if _, err := clientConn.Write([]byte(req)); err != nil {
+		t.Fatalf("write connect request: %v", err)
+	}
+
+	reader := bufio.NewReader(clientConn)
+	statusLine, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read status line: %v", err)
+	}
+	if !strings.Contains(statusLine, "200 Connection Established") {
+		t.Fatalf("unexpected CONNECT status line: %q", statusLine)
+	}
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read response headers: %v", err)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+
+	const payload = "failover-through-connect"
+	if _, err := clientConn.Write([]byte(payload)); err != nil {
+		t.Fatalf("write tunneled payload: %v", err)
+	}
+	echo := make([]byte, len(payload))
+	if _, err := io.ReadFull(reader, echo); err != nil {
+		t.Fatalf("read tunneled echo: %v", err)
+	}
+	if got := string(echo); got != payload {
+		t.Fatalf("echo payload: got %q, want %q", got, payload)
+	}
+
+	_ = clientConn.Close()
+	<-targetDone
+
+	select {
+	case logEv := <-emitter.logCh:
+		if logEv.NodeHash != backupHash.Hex() {
+			t.Fatalf("NodeHash: got %q, want %q", logEv.NodeHash, backupHash.Hex())
+		}
+		if logEv.ConnectAttemptCount != 2 {
+			t.Fatalf("ConnectAttemptCount: got %d, want 2", logEv.ConnectAttemptCount)
+		}
+		if !logEv.ConnectFailoverUsed {
+			t.Fatal("ConnectFailoverUsed: got false, want true")
+		}
+		if len(logEv.ConnectAttemptTrace) != 2 {
+			t.Fatalf("ConnectAttemptTrace len: got %d, want 2", len(logEv.ConnectAttemptTrace))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected CONNECT log event")
+	}
+}
+
+func TestEstablishConnectWithFailover_UsesSameIPCandidate(t *testing.T) {
+	env := newProxyE2EEnv(t)
+
+	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen target: %v", err)
+	}
+	defer targetLn.Close()
+
+	targetDone := make(chan struct{})
+	go func() {
+		defer close(targetDone)
+		conn, acceptErr := targetLn.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = io.Copy(conn, conn)
+	}()
+
+	primaryHash := node.HashFromRawOptions(json.RawMessage(`{"type":"stub","server":"127.0.0.1","server_port":1}`))
+	setProxyE2EOutboundDialFunc(t, env, func(context.Context, string, M.Socksaddr) (net.Conn, error) {
+		return nil, dialErr{}
+	})
+	backupHash := addProxyE2EBootstrapNode(
+		t,
+		env,
+		`{"type":"stub","server":"127.0.0.1","server_port":2}`,
+		"203.0.113.10",
+		"example.com",
+		25*time.Millisecond,
+		func(context.Context, string, M.Socksaddr) (net.Conn, error) {
+			return net.Dial("tcp", targetLn.Addr().String())
+		},
+	)
+
+	if err := env.router.UpsertLease(model.Lease{
+		PlatformID:     "plat-id",
+		Account:        "user",
+		NodeHash:       primaryHash.Hex(),
+		EgressIP:       "203.0.113.10",
+		CreatedAtNs:    time.Now().Add(-time.Minute).UnixNano(),
+		ExpiryNs:       time.Now().Add(time.Hour).UnixNano(),
+		LastAccessedNs: time.Now().UnixNano(),
+	}); err != nil {
+		t.Fatalf("UpsertLease: %v", err)
+	}
+
+	result := establishConnectWithFailover(
+		context.Background(),
+		env.router,
+		env.pool,
+		"plat",
+		"user",
+		targetLn.Addr().String(),
+		&mockHealthRecorder{},
+		"connect_dial",
+	)
+	if result.proxyErr != nil {
+		t.Fatalf("proxyErr: %v attempts=%+v", result.proxyErr, result.attempts)
+	}
+	if result.conn == nil {
+		t.Fatal("expected successful failover connection")
+	}
+	if result.routed.Route.NodeHash != backupHash {
+		t.Fatalf("routed node = %s, want %s", result.routed.Route.NodeHash.Hex(), backupHash.Hex())
+	}
+	_ = result.conn.Close()
+	<-targetDone
 }
 
 func TestForwardProxy_CONNECTClientCanceledBeforeResponse(t *testing.T) {

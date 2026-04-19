@@ -39,6 +39,23 @@ type RequestFinishedEvent struct {
 	DurationNs int64
 }
 
+// ConnectAttemptTraceItem captures one CONNECT candidate attempt.
+type ConnectAttemptTraceItem struct {
+	Index         int    `json:"index"`
+	NodeHash      string `json:"node_hash"`
+	NodeTag       string `json:"node_tag"`
+	EgressIP      string `json:"egress_ip"`
+	TierKind      string `json:"tier_kind"`
+	TierKey       string `json:"tier_key"`
+	TierIndex     int    `json:"tier_index"`
+	SameIPRetry   bool   `json:"same_ip_retry"`
+	DialTimeoutMs int64  `json:"dial_timeout_ms"`
+	DurationMs    int64  `json:"duration_ms"`
+	Result        string `json:"result"`
+	ResinError    string `json:"resin_error"`
+	UpstreamStage string `json:"upstream_stage"`
+}
+
 // RequestLogEntry captures per-request details for the structured request log.
 // Used by the requestlog subsystem (Phase 8).
 type RequestLogEntry struct {
@@ -65,6 +82,10 @@ type RequestLogEntry struct {
 	UpstreamErrMsg  string // sanitized upstream error message
 	IngressBytes    int64  // bytes from upstream to client (header + body)
 	EgressBytes     int64  // bytes from client to upstream (header + body)
+
+	ConnectAttemptCount int
+	ConnectFailoverUsed bool
+	ConnectAttemptTrace []ConnectAttemptTraceItem
 
 	// Optional detail payload (mainly for reverse proxy request logging).
 	ReqHeaders           []byte

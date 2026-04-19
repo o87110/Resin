@@ -26,9 +26,9 @@ It helps shield your services from unstable upstream proxies and aggregates them
 
 - **Massive-scale management**: Easily handles 100k+ proxy nodes with native high-concurrency performance.
 - **Smart scheduling and circuit breaking**: Fully automated **passive + active** health checks, outbound IP probing, and latency analysis to remove bad nodes precisely. Uses P2C plus domain-aware latency-weighted scoring for optimal node selection.
-- **Business-friendly sticky proxying**: Keeps the same business account bound to a stable outbound IP. If a node fails, Resin seamlessly switches to another node with the same IP.
+- **Business-friendly sticky proxying**: Keeps the same business account bound to a stable outbound IP. When `SOCKS5` / `HTTP CONNECT` hits a bad node during the connect phase, Resin quickly switches candidates with same-IP preference first, then progressively falls through lower tiers.
 - **Dual access modes**: Supports both standard forward proxy (HTTP Proxy / SOCKS5) and URL-based reverse proxy.
-- **Observability**: Detailed metrics and logs, plus a visual Web UI. Includes complete structured request logs for querying and auditing by platform, account, target site, and more.
+- **Observability**: Detailed metrics and logs, plus a visual Web UI. Includes complete structured request logs for querying and auditing by platform, account, target site, and more; `SOCKS5` / `HTTP CONNECT` also records the connect failover attempt trace.
 - **Simple and powerful**: Works out of the box with default settings, while still offering deep customization for enterprise-grade needs.
 - **Cross-subscription deduplication**: Automatically merges identical nodes from different subscriptions and shares their health state.
 - **Hot reload**: Update common settings without restart. Refresh subscriptions without dropping existing traffic.
@@ -195,7 +195,41 @@ First, understand two core concepts:
 ### 🎯 Core Concepts: Platform and Account
 
 - **Platform**: An isolated node pool. You can build it with filters (for example, only US nodes). Resin provides a default `Default` platform containing all available nodes.
-- **Account**: A unique business identity (for example `Tom` or `user_1`). For requests carrying an Account, Resin anchors traffic to a dedicated high-quality outbound node. If that node fails, Resin retries seamlessly and switches to another node with the same IP. Priority tiers only affect new route selection; they do not break an existing sticky lease or override same-egress-IP failover.
+- **Account**: A unique business identity (for example `Tom` or `user_1`). For requests carrying an Account, Resin anchors traffic to a dedicated high-quality outbound node. When `SOCKS5` / `HTTP CONNECT` hits a bad node during the connect phase, Resin retries within the same request and prefers another node with the same IP before progressively falling through lower priority tiers. Priority tiers only affect new route selection; they do not break an existing sticky lease or override same-egress-IP failover.
+
+> The in-request fast failover currently applies only to `SOCKS5` and `HTTP CONNECT`. Plain HTTP forward-proxy requests and reverse proxy keep their existing semantics: failed requests are re-routed by subsequent requests, not switched in the middle of an already-started request.
+
+### CONNECT fast failover
+
+During `SOCKS5` and HTTP proxy `CONNECT`, Resin enables a connect-phase fast failover:
+
+- Try the current sticky node first
+- Try up to 2 backup nodes with the same egress IP
+- Then walk the current priority tier, followed by lower tiers
+- Fallback tier is the last resort
+- A single request never reuses the same node twice, and it does not bounce around inside one bad IP group
+
+Default connect budget:
+
+- Sticky first attempt timeout: `3s`
+- Each same-IP backup timeout: `1.5s`
+- Each different-IP candidate timeout: `2s`
+- Total wall-clock budget: `15s`
+
+The “connect timeout” here means: from the candidate node's `DialContext` call to receiving a usable upstream TCP connection. It is not the full business request duration, and it is not the tunnel/session duration shown in request logs.
+
+### CONNECT attempt trace in request logs
+
+When `SOCKS5` / `HTTP CONNECT` performs failover, request logs also show:
+
+- Attempt count
+- Whether failover was used
+- Per-attempt node, egress IP, tier, timeout, duration, and failure result
+
+This makes it easy to distinguish:
+
+- Resin is actively progressing through new candidates
+- versus traffic being stuck on the same node or the same IP group
 
 ### Sticky proxy access formats
 

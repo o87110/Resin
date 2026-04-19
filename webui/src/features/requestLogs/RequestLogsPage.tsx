@@ -80,6 +80,21 @@ function boolFromFilter(value: BoolFilter): boolean | undefined {
   return undefined;
 }
 
+function getConnectAttemptCount(log: RequestLogItem): number {
+  return typeof log.connect_attempt_count === "number" ? log.connect_attempt_count : 0;
+}
+
+function formatConnectSwitchSummary(log: RequestLogItem, t: ReturnType<typeof useI18n>["t"]): string {
+  const count = getConnectAttemptCount(log);
+  if (count <= 0) {
+    return "-";
+  }
+  if (count <= 1) {
+    return t("未切换");
+  }
+  return `${t("已切换")} · ${count} ${t("次尝试")}`;
+}
+
 function decodeBase64ToBytes(raw: string): Uint8Array | null {
   if (!raw) {
     return new Uint8Array(0);
@@ -588,6 +603,23 @@ export function RequestLogsPage() {
         cell: (info) => `${info.getValue()} ms`,
       }),
       col.display({
+        id: "connect_failover",
+        header: t("切换"),
+        cell: (info) => {
+          const log = info.row.original;
+          const count = getConnectAttemptCount(log);
+          if (count <= 0) {
+            return "-";
+          }
+          return (
+            <div className="logs-cell-stack">
+              <span>{formatConnectSwitchSummary(log, t)}</span>
+              <small>{count} {t("次尝试")}</small>
+            </div>
+          );
+        },
+      }),
+      col.display({
         id: "traffic",
         header: t("流量"),
         cell: (info) => {
@@ -923,11 +955,66 @@ export function RequestLogsPage() {
                     <p>{detailLog.egress_ip || "-"}</p>
                   </div>
                   <div>
+                    <span>{t("切换")}</span>
+                    <p>{formatConnectSwitchSummary(detailLog, t)}</p>
+                  </div>
+                  <div>
+                    <span>{t("尝试次数")}</span>
+                    <p>{getConnectAttemptCount(detailLog) || "-"}</p>
+                  </div>
+                  <div>
                     <span>{t("客户端 IP")}</span>
                     <p>{detailLog.client_ip || "-"}</p>
                   </div>
                 </div>
               </section>
+
+              {detailLog.connect_attempt_trace && detailLog.connect_attempt_trace.length > 0 ? (
+                <section className="platform-drawer-section">
+                  <div className="platform-drawer-section-head">
+                    <h4>{t("尝试链路")}</h4>
+                    <p>{t("当前仅 SOCKS5 与 HTTP CONNECT 记录建连切换链路。")}</p>
+                  </div>
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+                      <thead>
+                        <tr style={{ textAlign: "left", color: "var(--text-secondary)" }}>
+                          <th style={{ padding: "0.5rem" }}>#</th>
+                          <th style={{ padding: "0.5rem" }}>{t("节点")}</th>
+                          <th style={{ padding: "0.5rem" }}>{t("出口 IP")}</th>
+                          <th style={{ padding: "0.5rem" }}>{t("层级")}</th>
+                          <th style={{ padding: "0.5rem" }}>{t("超时")}</th>
+                          <th style={{ padding: "0.5rem" }}>{t("耗时")}</th>
+                          <th style={{ padding: "0.5rem" }}>{t("结果")}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {detailLog.connect_attempt_trace.map((attempt) => (
+                          <tr key={`${attempt.index}-${attempt.node_hash}`} style={{ borderTop: "1px solid var(--border)" }}>
+                            <td style={{ padding: "0.5rem" }}>{attempt.index}</td>
+                            <td style={{ padding: "0.5rem" }}>
+                              <div className="logs-cell-stack">
+                                <span>{attempt.node_tag || attempt.node_hash || "-"}</span>
+                                <small>{attempt.same_ip_retry ? t("同 IP 替代") : attempt.node_hash || "-"}</small>
+                              </div>
+                            </td>
+                            <td style={{ padding: "0.5rem" }}>{attempt.egress_ip || "-"}</td>
+                            <td style={{ padding: "0.5rem" }}>{attempt.tier_kind || "-"}</td>
+                            <td style={{ padding: "0.5rem" }}>{attempt.dial_timeout_ms || 0} ms</td>
+                            <td style={{ padding: "0.5rem" }}>{attempt.duration_ms || 0} ms</td>
+                            <td style={{ padding: "0.5rem" }}>
+                              <div className="logs-cell-stack">
+                                <span>{attempt.result || "-"}</span>
+                                <small>{attempt.resin_error || attempt.upstream_stage || "-"}</small>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              ) : null}
 
               <section className="platform-drawer-section">
                 <div className="platform-drawer-section-head">

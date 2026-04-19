@@ -2,6 +2,7 @@ package requestlog
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -18,7 +19,7 @@ import (
 	"github.com/Resinat/Resin/internal/state"
 )
 
-const logSummarySelectColumns = "id, ts_ns, proxy_type, client_ip, platform_id, platform_name, account, target_host, target_url, node_hash, node_tag, egress_ip, duration_ns, net_ok, http_method, http_status, resin_error, upstream_stage, upstream_err_kind, upstream_errno, upstream_err_msg, ingress_bytes, egress_bytes, payload_present, req_headers_len, req_body_len, resp_headers_len, resp_body_len, req_headers_truncated, req_body_truncated, resp_headers_truncated, resp_body_truncated"
+const logSummarySelectColumns = "id, ts_ns, proxy_type, client_ip, platform_id, platform_name, account, target_host, target_url, node_hash, node_tag, egress_ip, duration_ns, net_ok, http_method, http_status, resin_error, upstream_stage, upstream_err_kind, upstream_errno, upstream_err_msg, ingress_bytes, egress_bytes, connect_attempt_count, connect_failover_used, connect_attempt_trace_json, payload_present, req_headers_len, req_body_len, resp_headers_len, resp_body_len, req_headers_truncated, req_body_truncated, resp_headers_truncated, resp_body_truncated"
 
 // Repo manages rolling SQLite databases for request logs.
 // Each DB is named request_logs-<unix_ms>.db and lives in logDir.
@@ -116,10 +117,11 @@ func (r *Repo) InsertBatch(entries []proxy.RequestLogEntry) (int, error) {
 		duration_ns, net_ok, http_method, http_status,
 		resin_error, upstream_stage, upstream_err_kind, upstream_errno, upstream_err_msg,
 		ingress_bytes, egress_bytes,
+		connect_attempt_count, connect_failover_used, connect_attempt_trace_json,
 		payload_present,
 		req_headers_len, req_body_len, resp_headers_len, resp_body_len,
 		req_headers_truncated, req_body_truncated, resp_headers_truncated, resp_body_truncated
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return 0, fmt.Errorf("requestlog repo prepare log: %w", err)
 	}
@@ -148,14 +150,23 @@ func (r *Repo) InsertBatch(entries []proxy.RequestLogEntry) (int, error) {
 		if e.ReqHeaders != nil || e.ReqBody != nil || e.RespHeaders != nil || e.RespBody != nil {
 			hasPayload = 1
 		}
+		connectFailoverUsed := 0
+		if e.ConnectFailoverUsed {
+			connectFailoverUsed = 1
+		}
+		connectAttemptTraceJSON, err := json.Marshal(e.ConnectAttemptTrace)
+		if err != nil {
+			connectAttemptTraceJSON = []byte("[]")
+		}
 
-		_, err := insertLog.Exec(
+		_, err = insertLog.Exec(
 			id, e.StartedAtNs, int(e.ProxyType), e.ClientIP,
 			e.PlatformID, e.PlatformName, e.Account,
 			e.TargetHost, e.TargetURL, e.NodeHash, e.NodeTag, e.EgressIP,
 			e.DurationNs, netOK, e.HTTPMethod, e.HTTPStatus,
 			e.ResinError, e.UpstreamStage, e.UpstreamErrKind, e.UpstreamErrno, e.UpstreamErrMsg,
 			e.IngressBytes, e.EgressBytes,
+			e.ConnectAttemptCount, connectFailoverUsed, string(connectAttemptTraceJSON),
 			hasPayload,
 			e.ReqHeadersLen, e.ReqBodyLen, e.RespHeadersLen, e.RespBodyLen,
 			boolToInt(e.ReqHeadersTruncated), boolToInt(e.ReqBodyTruncated),
@@ -222,6 +233,9 @@ type LogSummary struct {
 	UpstreamErrMsg  string `json:"upstream_err_msg"`
 	IngressBytes    int64  `json:"ingress_bytes"`
 	EgressBytes     int64  `json:"egress_bytes"`
+	ConnectAttemptCount int                        `json:"connect_attempt_count"`
+	ConnectFailoverUsed bool                       `json:"connect_failover_used"`
+	ConnectAttemptTrace []proxy.ConnectAttemptTraceItem `json:"connect_attempt_trace,omitempty"`
 
 	PayloadPresent       bool `json:"payload_present"`
 	ReqHeadersLen        int  `json:"req_headers_len"`
@@ -426,6 +440,10 @@ func (r *Repo) openDB(path string) error {
 		return err
 	}
 	if err := state.InitDB(db, CreateDDL); err != nil {
+		db.Close()
+		return err
+	}
+	if err := ensureOptionalColumns(db); err != nil {
 		db.Close()
 		return err
 	}
@@ -635,7 +653,8 @@ type rowScanner interface {
 
 func scanLogSummary(s rowScanner) (LogSummary, error) {
 	var row LogSummary
-	var netOK, payloadPresent, rht, rbt, rsht, rsbt int
+	var netOK, connectFailoverUsed, payloadPresent, rht, rbt, rsht, rsbt int
+	var connectAttemptTraceJSON string
 	err := s.Scan(
 		&row.ID, &row.TsNs, &row.ProxyType, &row.ClientIP,
 		&row.PlatformID, &row.PlatformName, &row.Account,
@@ -643,6 +662,7 @@ func scanLogSummary(s rowScanner) (LogSummary, error) {
 		&row.DurationNs, &netOK, &row.HTTPMethod, &row.HTTPStatus,
 		&row.ResinError, &row.UpstreamStage, &row.UpstreamErrKind, &row.UpstreamErrno, &row.UpstreamErrMsg,
 		&row.IngressBytes, &row.EgressBytes,
+		&row.ConnectAttemptCount, &connectFailoverUsed, &connectAttemptTraceJSON,
 		&payloadPresent,
 		&row.ReqHeadersLen, &row.ReqBodyLen, &row.RespHeadersLen, &row.RespBodyLen,
 		&rht, &rbt, &rsht, &rsbt,
@@ -651,12 +671,37 @@ func scanLogSummary(s rowScanner) (LogSummary, error) {
 		return LogSummary{}, err
 	}
 	row.NetOK = netOK != 0
+	row.ConnectFailoverUsed = connectFailoverUsed != 0
+	if connectAttemptTraceJSON != "" {
+		if err := json.Unmarshal([]byte(connectAttemptTraceJSON), &row.ConnectAttemptTrace); err != nil {
+			log.Printf("[requestlog] warning: decode connect attempt trace failed for row %q: %v", row.ID, err)
+			row.ConnectAttemptTrace = nil
+		}
+	}
 	row.PayloadPresent = payloadPresent != 0
 	row.ReqHeadersTruncated = rht != 0
 	row.ReqBodyTruncated = rbt != 0
 	row.RespHeadersTruncated = rsht != 0
 	row.RespBodyTruncated = rsbt != 0
 	return row, nil
+}
+
+func ensureOptionalColumns(db *sql.DB) error {
+	stmts := []string{
+		"ALTER TABLE request_logs ADD COLUMN connect_attempt_count INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE request_logs ADD COLUMN connect_failover_used INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE request_logs ADD COLUMN connect_attempt_trace_json TEXT NOT NULL DEFAULT ''",
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			errText := strings.ToLower(err.Error())
+			if strings.Contains(errText, "duplicate column name") {
+				continue
+			}
+			return fmt.Errorf("requestlog ensure optional columns: %w", err)
+		}
+	}
+	return nil
 }
 
 func boolToInt(b bool) int {

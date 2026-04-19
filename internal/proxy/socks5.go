@@ -158,30 +158,38 @@ func (h *Socks5Handler) ServeConn(conn net.Conn) {
 	lifecycle := newSOCKSLifecycle(h.events, clientIP, account, target, "SOCKS5")
 	defer lifecycle.finish()
 
-	routed, upstreamConn, proxyErr, dialErr, canceled := h.establishSOCKSUpstream(ctx, platName, account, target)
-	if canceled {
+	connectResult := establishConnectWithFailover(
+		ctx,
+		h.router,
+		h.pool,
+		platName,
+		account,
+		target,
+		h.health,
+		"socks_dial",
+	)
+	lifecycle.log.ConnectAttemptTrace = connectResult.attempts
+	lifecycle.log.ConnectAttemptCount, lifecycle.log.ConnectFailoverUsed = connectAttemptSummary(connectResult.attempts)
+	if connectResult.routed.Route.NodeHash != node.Zero {
+		lifecycle.setRouteResult(connectResult.routed.Route)
+	}
+	if connectResult.canceled {
 		lifecycle.setNetOK(true)
 		conn.Close()
 		return
 	}
-	if proxyErr != nil {
-		lifecycle.setProxyError(proxyErr)
-		lifecycle.setHTTPStatus(proxyErr.HTTPCode)
-		if dialErr != nil {
-			lifecycle.setUpstreamError("socks_dial", dialErr)
-			if h.health != nil && routed.Route.NodeHash != node.Zero {
-				go h.health.RecordResult(routed.Route.NodeHash, false)
-			}
+	if connectResult.proxyErr != nil {
+		lifecycle.setProxyError(connectResult.proxyErr)
+		lifecycle.setHTTPStatus(connectResult.proxyErr.HTTPCode)
+		if connectResult.dialErr != nil {
+			lifecycle.setUpstreamError("socks_dial", connectResult.dialErr)
 		}
-		h.writeSOCKS5FailureAndClose(conn, proxyErrorToSOCKS5Reply(proxyErr))
+		h.writeSOCKS5FailureAndClose(conn, proxyErrorToSOCKS5Reply(connectResult.proxyErr))
 		return
 	}
-	lifecycle.setRouteResult(routed.Route)
-
+	routed := connectResult.routed
+	upstreamConn := connectResult.conn
 	domain := netutil.ExtractDomain(target)
-	if h.health != nil {
-		go h.health.RecordLatency(routed.Route.NodeHash, domain, nil)
-	}
 
 	if err := h.sendReply(conn, socks5RepSuccess); err != nil {
 		lifecycle.setProxyError(ErrUpstreamRequestFailed)

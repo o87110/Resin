@@ -302,6 +302,9 @@ type logListItem struct {
 	UpstreamErrMsg       string `json:"upstream_err_msg"`
 	IngressBytes         int64  `json:"ingress_bytes"`
 	EgressBytes          int64  `json:"egress_bytes"`
+	ConnectAttemptCount  int    `json:"connect_attempt_count"`
+	ConnectFailoverUsed  bool   `json:"connect_failover_used"`
+	ConnectAttemptTrace  any    `json:"connect_attempt_trace,omitempty"`
 	PayloadPresent       bool   `json:"payload_present"`
 	ReqHeadersLen        int    `json:"req_headers_len"`
 	ReqBodyLen           int    `json:"req_body_len"`
@@ -338,6 +341,9 @@ func toLogListItem(s requestlog.LogSummary) logListItem {
 		UpstreamErrMsg:       s.UpstreamErrMsg,
 		IngressBytes:         s.IngressBytes,
 		EgressBytes:          s.EgressBytes,
+		ConnectAttemptCount:  s.ConnectAttemptCount,
+		ConnectFailoverUsed:  s.ConnectFailoverUsed,
+		ConnectAttemptTrace:  s.ConnectAttemptTrace,
 		PayloadPresent:       s.PayloadPresent,
 		ReqHeadersLen:        s.ReqHeadersLen,
 		ReqBodyLen:           s.ReqBodyLen,

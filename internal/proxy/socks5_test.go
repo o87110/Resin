@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Resinat/Resin/internal/config"
+	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/platform"
 	M "github.com/sagernet/sing/common/metadata"
@@ -389,6 +390,139 @@ func TestSocks5Handler_E2EConnectSuccess(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("expected RecordResult call for SOCKS5 success")
+}
+
+func TestSocks5Handler_E2EConnectFailoverToSameIPCandidate(t *testing.T) {
+	env := newProxyE2EEnv(t)
+	emitter := newMockEventEmitter()
+	health := &mockHealthRecorder{}
+
+	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen target: %v", err)
+	}
+	defer targetLn.Close()
+
+	targetDone := make(chan struct{})
+	go func() {
+		defer close(targetDone)
+		conn, acceptErr := targetLn.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = io.Copy(conn, conn)
+	}()
+
+	primaryHash := node.HashFromRawOptions(json.RawMessage(`{"type":"stub","server":"127.0.0.1","server_port":1}`))
+	setProxyE2EOutboundDialFunc(t, env, func(context.Context, string, M.Socksaddr) (net.Conn, error) {
+		return nil, dialErr{}
+	})
+	backupHash := addProxyE2EBootstrapNode(
+		t,
+		env,
+		`{"type":"stub","server":"127.0.0.1","server_port":2}`,
+		"203.0.113.10",
+		"example.com",
+		25*time.Millisecond,
+		func(context.Context, string, M.Socksaddr) (net.Conn, error) {
+			return net.Dial("tcp", targetLn.Addr().String())
+		},
+	)
+
+	if err := env.router.UpsertLease(model.Lease{
+		PlatformID:     "plat-id",
+		Account:        "user",
+		NodeHash:       primaryHash.Hex(),
+		EgressIP:       "203.0.113.10",
+		CreatedAtNs:    time.Now().Add(-time.Minute).UnixNano(),
+		ExpiryNs:       time.Now().Add(time.Hour).UnixNano(),
+		LastAccessedNs: time.Now().UnixNano(),
+	}); err != nil {
+		t.Fatalf("UpsertLease: %v", err)
+	}
+	plan, err := env.router.BuildConnectRoutePlan("plat", "user", targetLn.Addr().String())
+	if err != nil {
+		t.Fatalf("BuildConnectRoutePlan: %v", err)
+	}
+	if len(plan.Candidates) < 2 {
+		t.Fatalf("expected at least 2 CONNECT candidates, got %d", len(plan.Candidates))
+	}
+
+	handler := NewSocks5Handler(Socks5HandlerConfig{
+		ProxyToken:  "tok",
+		AuthVersion: string(config.AuthVersionV1),
+		Router:      env.router,
+		Pool:        env.pool,
+		Health:      health,
+		Events:      emitter,
+		Timeout:     time.Second,
+	})
+
+	serverConn, clientConn := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handler.ServeConn(serverConn)
+	}()
+
+	if _, err := clientConn.Write([]byte{socks5Version, 0x01, socks5AuthUser}); err != nil {
+		t.Fatalf("write method selection: %v", err)
+	}
+	reply := make([]byte, 2)
+	if _, err := io.ReadFull(clientConn, reply); err != nil {
+		t.Fatalf("read method selection reply: %v", err)
+	}
+	if _, err := clientConn.Write(socks5UserPassPayload("plat.user", "tok")); err != nil {
+		t.Fatalf("write auth payload: %v", err)
+	}
+	if _, err := io.ReadFull(clientConn, reply); err != nil {
+		t.Fatalf("read auth reply: %v", err)
+	}
+
+	if _, err := clientConn.Write(socks5ConnectRequest(targetLn.Addr().String())); err != nil {
+		t.Fatalf("write connect request: %v", err)
+	}
+	connectReply := make([]byte, 10)
+	if _, err := io.ReadFull(clientConn, connectReply); err != nil {
+		t.Fatalf("read connect reply: %v", err)
+	}
+	if connectReply[0] != socks5Version || connectReply[1] != socks5RepSuccess {
+		t.Fatalf("connect reply: got %v, want success", connectReply)
+	}
+
+	const payload = "failover-through-socks"
+	if _, err := clientConn.Write([]byte(payload)); err != nil {
+		t.Fatalf("write tunneled payload: %v", err)
+	}
+	echo := make([]byte, len(payload))
+	if _, err := io.ReadFull(clientConn, echo); err != nil {
+		t.Fatalf("read tunneled echo: %v", err)
+	}
+	if string(echo) != payload {
+		t.Fatalf("echo: got %q, want %q", string(echo), payload)
+	}
+	_ = clientConn.Close()
+	<-done
+	<-targetDone
+
+	select {
+	case logEv := <-emitter.logCh:
+		if logEv.NodeHash != backupHash.Hex() {
+			t.Fatalf("NodeHash: got %q, want %q", logEv.NodeHash, backupHash.Hex())
+		}
+		if logEv.ConnectAttemptCount != 2 {
+			t.Fatalf("ConnectAttemptCount: got %d, want 2", logEv.ConnectAttemptCount)
+		}
+		if !logEv.ConnectFailoverUsed {
+			t.Fatal("ConnectFailoverUsed: got false, want true")
+		}
+		if len(logEv.ConnectAttemptTrace) != 2 {
+			t.Fatalf("ConnectAttemptTrace len: got %d, want 2", len(logEv.ConnectAttemptTrace))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected SOCKS5 log event")
+	}
 }
 
 func TestSocks5Handler_SOCKS4RejectsWhenDisabled(t *testing.T) {

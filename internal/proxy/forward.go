@@ -16,9 +16,9 @@ import (
 
 	"github.com/Resinat/Resin/internal/config"
 	"github.com/Resinat/Resin/internal/netutil"
+	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/outbound"
 	"github.com/Resinat/Resin/internal/routing"
-	M "github.com/sagernet/sing/common/metadata"
 )
 
 // ForwardProxyConfig holds dependencies for the forward proxy.
@@ -391,36 +391,36 @@ func (p *ForwardProxy) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 	defer lifecycle.finish()
 	lifecycle.setAccount(account)
 
-	routed, routeErr := resolveRoutedOutbound(p.router, p.pool, platName, account, target)
-	if routeErr != nil {
-		lifecycle.setProxyError(routeErr)
-		lifecycle.setHTTPStatus(routeErr.HTTPCode)
-		writeProxyError(w, routeErr)
+	connectResult := establishConnectWithFailover(
+		r.Context(),
+		p.router,
+		p.pool,
+		platName,
+		account,
+		target,
+		p.health,
+		"connect_dial",
+	)
+	lifecycle.log.ConnectAttemptTrace = connectResult.attempts
+	lifecycle.log.ConnectAttemptCount, lifecycle.log.ConnectFailoverUsed = connectAttemptSummary(connectResult.attempts)
+	if connectResult.routed.Route.NodeHash != node.Zero {
+		lifecycle.setRouteResult(connectResult.routed.Route)
+	}
+	if connectResult.canceled {
+		lifecycle.setNetOK(true)
 		return
 	}
-	lifecycle.setRouteResult(routed.Route)
-
-	// Wrap the dialed connection with tlsLatencyConn for passive TLS latency.
-	domain := netutil.ExtractDomain(target)
+	if connectResult.proxyErr != nil {
+		lifecycle.setProxyError(connectResult.proxyErr)
+		lifecycle.setUpstreamError("connect_dial", connectResult.dialErr)
+		lifecycle.setHTTPStatus(connectResult.proxyErr.HTTPCode)
+		writeProxyError(w, connectResult.proxyErr)
+		return
+	}
+	routed := connectResult.routed
+	rawConn := connectResult.conn
 	nodeHashRaw := routed.Route.NodeHash
-	go p.health.RecordLatency(nodeHashRaw, domain, nil)
-
-	rawConn, err := routed.Outbound.DialContext(r.Context(), "tcp", M.ParseSocksaddr(target))
-	if err != nil {
-		proxyErr := classifyConnectError(err)
-		if proxyErr == nil {
-			// context.Canceled before CONNECT response — no health penalty,
-			// but mark log as net-ok.
-			lifecycle.setNetOK(true)
-			return
-		}
-		lifecycle.setProxyError(proxyErr)
-		lifecycle.setUpstreamError("connect_dial", err)
-		lifecycle.setHTTPStatus(proxyErr.HTTPCode)
-		go p.health.RecordResult(nodeHashRaw, false)
-		writeProxyError(w, proxyErr)
-		return
-	}
+	domain := netutil.ExtractDomain(target)
 	recordConnectResult := func(ok bool) {
 		lifecycle.setNetOK(ok)
 		go p.health.RecordResult(nodeHashRaw, ok)
