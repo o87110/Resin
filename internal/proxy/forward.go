@@ -509,26 +509,22 @@ func (p *ForwardProxy) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 	egressResult := <-egressBytesCh
 	lifecycle.addEgressBytes(egressResult.n)
 
-	okResult := ingressBytes > 0 && egressResult.n > 0
-	if !okResult {
+	outcome := classifyTunnelOutcome(
+		"connect_upstream_to_client_copy",
+		"connect_client_to_upstream_copy",
+		"connect_zero_traffic",
+		"connect_no_ingress_traffic",
+		"connect_no_egress_traffic",
+		ingressBytes,
+		ingressCopyErr,
+		egressResult.n,
+		egressResult.err,
+	)
+	if !outcome.ok {
 		lifecycle.setProxyError(ErrUpstreamRequestFailed)
-		switch {
-		case !isBenignTunnelCopyError(ingressCopyErr):
-			lifecycle.setUpstreamError("connect_upstream_to_client_copy", ingressCopyErr)
-		case !isBenignTunnelCopyError(egressResult.err):
-			lifecycle.setUpstreamError("connect_client_to_upstream_copy", egressResult.err)
-		default:
-			switch {
-			case ingressBytes == 0 && egressResult.n == 0:
-				lifecycle.setUpstreamError("connect_zero_traffic", nil)
-			case ingressBytes == 0:
-				lifecycle.setUpstreamError("connect_no_ingress_traffic", nil)
-			default:
-				lifecycle.setUpstreamError("connect_no_egress_traffic", nil)
-			}
-		}
+		lifecycle.setUpstreamError(outcome.stage, outcome.err)
 	}
-	recordConnectResult(okResult)
+	recordConnectResult(outcome.ok)
 }
 
 // makeTunnelClientReader returns a reader for client->upstream copy that

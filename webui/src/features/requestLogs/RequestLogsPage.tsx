@@ -23,6 +23,7 @@ import type { RequestLogItem, RequestLogListFilters } from "./types";
 
 type BoolFilter = "all" | "true" | "false";
 type ProxyTypeFilter = "all" | "1" | "2";
+type TranslateFn = ReturnType<typeof useI18n>["t"];
 
 type FilterDraft = {
   from_local: string;
@@ -93,6 +94,77 @@ function formatConnectSwitchSummary(log: RequestLogItem, t: ReturnType<typeof us
     return t("未切换");
   }
   return `${t("已切换")} · ${count} ${t("次尝试")}`;
+}
+
+function formatConnectAttemptResult(result: string, t: TranslateFn): string {
+  switch (result) {
+    case "success":
+      return t("成功");
+    case "failure":
+      return t("失败");
+    case "canceled":
+      return t("已取消");
+    default:
+      return result || "-";
+  }
+}
+
+function formatUpstreamStage(stage: string, t: TranslateFn): string {
+  switch (stage) {
+    case "connect_dial":
+      return t("CONNECT 建连失败");
+    case "connect_hijack":
+      return t("CONNECT 劫持连接失败");
+    case "connect_client_response_write":
+      return t("CONNECT 成功响应写回客户端失败");
+    case "connect_client_response_flush":
+      return t("CONNECT 成功响应刷新到客户端失败");
+    case "connect_client_prefetch_drain":
+      return t("CONNECT 客户端预读缓冲区处理失败");
+    case "connect_upstream_to_client_copy":
+      return t("CONNECT 隧道下行复制失败");
+    case "connect_client_to_upstream_copy":
+      return t("CONNECT 隧道上行复制失败");
+    case "connect_zero_traffic":
+      return t("CONNECT 隧道无双向流量");
+    case "connect_no_ingress_traffic":
+      return t("CONNECT 隧道无下行流量");
+    case "connect_no_egress_traffic":
+      return t("CONNECT 隧道无上行流量");
+    case "socks_dial":
+      return t("SOCKS5 建连失败");
+    case "socks_client_reply":
+      return t("SOCKS5 响应客户端失败");
+    case "socks_upstream_to_client":
+      return t("SOCKS5 隧道下行复制失败");
+    case "socks_client_to_upstream":
+      return t("SOCKS5 隧道上行复制失败");
+    case "socks_zero_traffic":
+      return t("SOCKS5 隧道无双向流量");
+    case "socks_no_ingress_traffic":
+      return t("SOCKS5 隧道无下行流量");
+    case "socks_no_egress_traffic":
+      return t("SOCKS5 隧道无上行流量");
+    case "forward_roundtrip":
+      return t("HTTP 正向代理请求上游失败");
+    case "reverse_roundtrip":
+      return t("反向代理请求上游失败");
+    default:
+      return stage || "-";
+  }
+}
+
+function formatDiagnosticSummary(log: RequestLogItem, t: TranslateFn): string {
+  if (log.upstream_stage) {
+    return formatUpstreamStage(log.upstream_stage, t);
+  }
+  if (log.resin_error) {
+    return log.resin_error;
+  }
+  if (log.upstream_err_kind) {
+    return log.upstream_err_kind;
+  }
+  return "-";
 }
 
 function decodeBase64ToBytes(raw: string): Uint8Array | null {
@@ -598,6 +670,25 @@ export function RequestLogsPage() {
           </Badge>
         ),
       }),
+      col.display({
+        id: "diagnostic",
+        header: t("诊断摘要"),
+        cell: (info) => {
+          const log = info.row.original;
+          const summary = formatDiagnosticSummary(log, t);
+          if (summary === "-") {
+            return "-";
+          }
+          return (
+            <div className="logs-cell-stack">
+              <span title={summary}>{summary}</span>
+              <small title={log.upstream_stage || log.resin_error || log.upstream_err_kind || "-"}>
+                {log.upstream_stage || log.resin_error || log.upstream_err_kind || "-"}
+              </small>
+            </div>
+          );
+        },
+      }),
       col.accessor("duration_ms", {
         header: t("耗时"),
         cell: (info) => `${info.getValue()} ms`,
@@ -1004,8 +1095,10 @@ export function RequestLogsPage() {
                             <td style={{ padding: "0.5rem" }}>{attempt.duration_ms || 0} ms</td>
                             <td style={{ padding: "0.5rem" }}>
                               <div className="logs-cell-stack">
-                                <span>{attempt.result || "-"}</span>
-                                <small>{attempt.resin_error || attempt.upstream_stage || "-"}</small>
+                                <span>{formatConnectAttemptResult(attempt.result, t)}</span>
+                                <small title={attempt.upstream_stage || attempt.resin_error || "-"}>
+                                  {attempt.upstream_stage ? formatUpstreamStage(attempt.upstream_stage, t) : (attempt.resin_error || "-")}
+                                </small>
                               </div>
                             </td>
                           </tr>
@@ -1043,7 +1136,12 @@ export function RequestLogsPage() {
                         {detailLog.upstream_stage ? (
                           <tr>
                             <td style={{ color: "var(--warning)", fontWeight: 600, paddingBottom: "8px", paddingRight: "16px", whiteSpace: "nowrap", verticalAlign: "top", width: "1%" }}>{t("失败阶段:")}</td>
-                            <td style={{ color: "var(--text)", paddingBottom: "8px", wordBreak: "break-all", verticalAlign: "top" }}>{detailLog.upstream_stage}</td>
+                            <td style={{ color: "var(--text)", paddingBottom: "8px", wordBreak: "break-all", verticalAlign: "top" }}>
+                              <div className="logs-cell-stack">
+                                <span>{formatUpstreamStage(detailLog.upstream_stage, t)}</span>
+                                <small>{detailLog.upstream_stage}</small>
+                              </div>
+                            </td>
                           </tr>
                         ) : null}
                         {detailLog.upstream_err_kind ? (

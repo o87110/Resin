@@ -366,19 +366,24 @@ func (h *Socks5Handler) relaySOCKSTunnel(
 	lifecycle.addIngressBytes(ingressBytes)
 	lifecycle.addEgressBytes(egressResult.n)
 
-	okResult := ingressBytes > 0 && egressResult.n > 0
-	if !okResult {
+	outcome := classifyTunnelOutcome(
+		"socks_upstream_to_client",
+		"socks_client_to_upstream",
+		"socks_zero_traffic",
+		"socks_no_ingress_traffic",
+		"socks_no_egress_traffic",
+		ingressBytes,
+		ingressErr,
+		egressResult.n,
+		egressResult.err,
+	)
+	if !outcome.ok {
 		lifecycle.setProxyError(ErrUpstreamRequestFailed)
-		switch {
-		case !isBenignTunnelCopyError(ingressErr):
-			lifecycle.setUpstreamError("socks_upstream_to_client", ingressErr)
-		case !isBenignTunnelCopyError(egressResult.err):
-			lifecycle.setUpstreamError("socks_client_to_upstream", egressResult.err)
-		}
+		lifecycle.setUpstreamError(outcome.stage, outcome.err)
 	}
-	lifecycle.setNetOK(okResult)
+	lifecycle.setNetOK(outcome.ok)
 	if h.health != nil {
-		go h.health.RecordResult(route.NodeHash, okResult)
+		go h.health.RecordResult(route.NodeHash, outcome.ok)
 	}
 }
 
