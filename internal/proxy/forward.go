@@ -1,8 +1,6 @@
 package proxy
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -423,125 +421,78 @@ func (p *ForwardProxy) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 	domain := netutil.ExtractDomain(target)
 	recordConnectResult := func(ok bool) {
 		lifecycle.setNetOK(ok)
-		go p.health.RecordResult(nodeHashRaw, ok)
+		if p.health != nil {
+			go p.health.RecordResult(nodeHashRaw, ok)
+		}
 	}
 
-	// Wrap with counting conn for traffic/connection metrics.
 	var upstreamBase net.Conn = rawConn
 	if p.metricsSink != nil {
 		p.metricsSink.OnConnectionLifecycle(ConnectionOutbound, ConnectionOpen)
 		upstreamBase = newCountingConn(rawConn, p.metricsSink)
 	}
 
-	// Wrap with TLS latency measurement.
 	upstreamConn := newTLSLatencyConn(upstreamBase, func(latency time.Duration) {
-		p.health.RecordLatency(nodeHashRaw, domain, &latency)
+		if p.health != nil {
+			p.health.RecordLatency(nodeHashRaw, domain, &latency)
+		}
 	})
+
+	session := &preparedTunnel{
+		upstreamConn: upstreamConn,
+		recordResult: recordConnectResult,
+	}
 
 	// Hijack the client connection.
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
-		upstreamConn.Close()
+		session.upstreamConn.Close()
 		lifecycle.setProxyError(ErrUpstreamRequestFailed)
 		lifecycle.setUpstreamError("connect_hijack", errors.New("response writer does not support hijacking"))
 		lifecycle.setHTTPStatus(ErrUpstreamRequestFailed.HTTPCode)
-		recordConnectResult(false)
+		session.recordResult(false)
 		writeProxyError(w, ErrUpstreamRequestFailed)
 		return
 	}
 
 	clientConn, clientBuf, err := hijacker.Hijack()
 	if err != nil {
-		upstreamConn.Close()
+		session.upstreamConn.Close()
 		lifecycle.setProxyError(ErrUpstreamRequestFailed)
 		lifecycle.setUpstreamError("connect_hijack", err)
-		recordConnectResult(false)
+		session.recordResult(false)
 		return
 	}
 
 	// Write the raw CONNECT success line with proper reason phrase.
 	if _, err := clientBuf.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
-		upstreamConn.Close()
+		session.upstreamConn.Close()
 		clientConn.Close()
 		lifecycle.setProxyError(ErrUpstreamRequestFailed)
 		lifecycle.setUpstreamError("connect_client_response_write", err)
-		recordConnectResult(false)
+		lifecycle.setNetOK(false)
 		return
 	}
 	if err := clientBuf.Flush(); err != nil {
-		upstreamConn.Close()
+		session.upstreamConn.Close()
 		clientConn.Close()
 		lifecycle.setProxyError(ErrUpstreamRequestFailed)
 		lifecycle.setUpstreamError("connect_client_response_flush", err)
-		recordConnectResult(false)
+		lifecycle.setNetOK(false)
 		return
 	}
 	lifecycle.setHTTPStatus(http.StatusOK)
-
-	// net/http may have pre-read bytes beyond the CONNECT request line/headers.
-	// Drain those buffered bytes first so tunnel forwarding stays byte-transparent.
-	clientToUpstream, err := makeTunnelClientReader(clientConn, clientBuf.Reader)
-	if err != nil {
-		upstreamConn.Close()
-		clientConn.Close()
-		lifecycle.setProxyError(ErrUpstreamRequestFailed)
-		lifecycle.setUpstreamError("connect_client_prefetch_drain", err)
-		recordConnectResult(false)
-		return
+	relay := pumpPreparedTunnel(clientConn, clientBuf.Reader, session, tunnelPumpOptions{
+		requireBidirectionalTraffic: true,
+	})
+	lifecycle.addIngressBytes(relay.ingressBytes)
+	lifecycle.addEgressBytes(relay.egressBytes)
+	if relay.proxyErr != nil {
+		lifecycle.setProxyError(relay.proxyErr)
+		lifecycle.setUpstreamError(relay.upstreamStage, relay.upstreamErr)
 	}
-
-	// Bidirectional tunnel — no HTTP error responses after this point.
-	type copyResult struct {
-		n   int64
-		err error
-	}
-	egressBytesCh := make(chan copyResult, 1)
-	go func() {
-		defer upstreamConn.Close()
-		defer clientConn.Close()
-		n, copyErr := io.Copy(upstreamConn, clientToUpstream)
-		egressBytesCh <- copyResult{n: n, err: copyErr}
-	}()
-	ingressBytes, ingressCopyErr := io.Copy(clientConn, upstreamConn)
-	lifecycle.addIngressBytes(ingressBytes)
-	clientConn.Close()
-	upstreamConn.Close()
-	egressResult := <-egressBytesCh
-	lifecycle.addEgressBytes(egressResult.n)
-
-	outcome := classifyTunnelOutcome(
-		"connect_upstream_to_client_copy",
-		"connect_client_to_upstream_copy",
-		"connect_zero_traffic",
-		"connect_no_ingress_traffic",
-		"connect_no_egress_traffic",
-		ingressBytes,
-		ingressCopyErr,
-		egressResult.n,
-		egressResult.err,
-	)
-	if !outcome.ok {
-		lifecycle.setProxyError(ErrUpstreamRequestFailed)
-		lifecycle.setUpstreamError(outcome.stage, outcome.err)
-	}
-	recordConnectResult(outcome.ok)
-}
-
-// makeTunnelClientReader returns a reader for client->upstream copy that
-// preserves any bytes already buffered by net/http before Hijack().
-func makeTunnelClientReader(clientConn net.Conn, buffered *bufio.Reader) (io.Reader, error) {
-	if buffered == nil {
-		return clientConn, nil
-	}
-	n := buffered.Buffered()
-	if n == 0 {
-		return clientConn, nil
-	}
-	prefetched := make([]byte, n)
-	if _, err := io.ReadFull(buffered, prefetched); err != nil {
-		return nil, err
-	}
-	return io.MultiReader(bytes.NewReader(prefetched), clientConn), nil
+	lifecycle.setNetOK(relay.netOK)
+	session.recordResult(relay.netOK)
 }
 
 // shouldRecordForwardCopyFailure decides whether an HTTP response body copy

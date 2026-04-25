@@ -103,26 +103,41 @@ func NewSocks5Handler(cfg Socks5HandlerConfig) *Socks5Handler {
 
 // ServeConn handles a single SOCKS5 connection (blocking).
 func (h *Socks5Handler) ServeConn(conn net.Conn) {
-	ctx, cancel := context.WithCancel(context.Background())
+	h.ServeConnContext(context.Background(), conn)
+}
+
+// ServeConnContext handles a single SOCKS5 connection bound to a caller context.
+func (h *Socks5Handler) ServeConnContext(baseCtx context.Context, conn net.Conn) {
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(baseCtx)
 	defer cancel()
+	defer conn.Close()
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+	defer close(done)
 
 	clientIP := clientIPFromConn(conn)
 	deadline := time.Now().Add(h.timeout)
 	if err := conn.SetReadDeadline(deadline); err != nil {
-		conn.Close()
 		return
 	}
 
 	// Phase 1: Method selection.
 	method, err := h.readMethodSelection(conn)
 	if err != nil {
-		conn.Close()
 		return
 	}
 
 	if method == 0xFF {
 		h.writeMethodSelection(conn, 0xFF)
-		conn.Close()
 		return
 	}
 
@@ -133,14 +148,12 @@ func (h *Socks5Handler) ServeConn(conn net.Conn) {
 	if method == socks5AuthUser {
 		platName, account, err = h.authenticate(conn)
 		if err != nil {
-			conn.Close()
 			return
 		}
 	}
 
 	// Clear read deadline for proxying.
 	if err := conn.SetReadDeadline(time.Time{}); err != nil {
-		conn.Close()
 		return
 	}
 
@@ -175,7 +188,6 @@ func (h *Socks5Handler) ServeConn(conn net.Conn) {
 	}
 	if connectResult.canceled {
 		lifecycle.setNetOK(true)
-		conn.Close()
 		return
 	}
 	if connectResult.proxyErr != nil {
@@ -195,7 +207,6 @@ func (h *Socks5Handler) ServeConn(conn net.Conn) {
 		lifecycle.setProxyError(ErrUpstreamRequestFailed)
 		lifecycle.setUpstreamError("socks_client_reply", err)
 		lifecycle.setNetOK(false)
-		conn.Close()
 		upstreamConn.Close()
 		return
 	}
@@ -205,18 +216,35 @@ func (h *Socks5Handler) ServeConn(conn net.Conn) {
 
 // ServeConnSOCKS4 handles a single SOCKS4a connection (blocking).
 func (h *Socks5Handler) ServeConnSOCKS4(conn net.Conn) {
+	h.ServeConnSOCKS4Context(context.Background(), conn)
+}
+
+// ServeConnSOCKS4Context handles a single SOCKS4a connection bound to a caller context.
+func (h *Socks5Handler) ServeConnSOCKS4Context(baseCtx context.Context, conn net.Conn) {
 	if !h.allowInsecureSOCKS4 || h.token != "" {
 		h.writeSOCKS4RejectAndClose(conn)
 		return
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(baseCtx)
 	defer cancel()
+	defer conn.Close()
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+	defer close(done)
 
 	clientIP := clientIPFromConn(conn)
 	deadline := time.Now().Add(h.timeout)
 	if err := conn.SetReadDeadline(deadline); err != nil {
-		conn.Close()
 		return
 	}
 
@@ -228,7 +256,6 @@ func (h *Socks5Handler) ServeConnSOCKS4(conn net.Conn) {
 
 	// Clear read deadline for proxying.
 	if err := conn.SetReadDeadline(time.Time{}); err != nil {
-		conn.Close()
 		return
 	}
 
@@ -239,7 +266,6 @@ func (h *Socks5Handler) ServeConnSOCKS4(conn net.Conn) {
 	routed, upstreamConn, proxyErr, dialErr, canceled := h.establishSOCKSUpstream(ctx, platName, account, target)
 	if canceled {
 		lifecycle.setNetOK(true)
-		conn.Close()
 		return
 	}
 	if proxyErr != nil {
@@ -265,7 +291,6 @@ func (h *Socks5Handler) ServeConnSOCKS4(conn net.Conn) {
 		lifecycle.setProxyError(ErrUpstreamRequestFailed)
 		lifecycle.setUpstreamError("socks_client_reply", err)
 		lifecycle.setNetOK(false)
-		conn.Close()
 		upstreamConn.Close()
 		return
 	}
@@ -285,10 +310,10 @@ func newSOCKSLifecycle(events EventEmitter, clientIP, account, target, methodLab
 	now := time.Now()
 	return &socks5Lifecycle{
 		events:   events,
-		finished: RequestFinishedEvent{ProxyType: ProxyTypeForward, IsConnect: true},
+		finished: RequestFinishedEvent{ProxyType: ProxyTypeSocks5Forward, IsConnect: true},
 		log: RequestLogEntry{
 			StartedAtNs: now.UnixNano(),
-			ProxyType:   ProxyTypeForward,
+			ProxyType:   ProxyTypeSocks5Forward,
 			ClientIP:    clientIP,
 			HTTPMethod:  methodLabel,
 			Account:     account,
@@ -344,47 +369,34 @@ func (h *Socks5Handler) relaySOCKSTunnel(
 	// Bind upstream lifecycle to client disconnect.
 	go func() {
 		<-ctx.Done()
-		tunneledUpstreamConn.Close()
+		_ = conn.Close()
+		_ = tunneledUpstreamConn.Close()
 	}()
 
-	// Bidirectional tunnel.
-	type copyResult struct {
-		n   int64
-		err error
+	session := &preparedTunnel{
+		upstreamConn: tunneledUpstreamConn,
+		recordResult: func(ok bool) {
+			if h.health != nil {
+				go h.health.RecordResult(route.NodeHash, ok)
+			}
+		},
 	}
-	egressCh := make(chan copyResult, 1)
-	go func() {
-		defer tunneledUpstreamConn.Close()
-		n, copyErr := io.Copy(tunneledUpstreamConn, conn)
-		egressCh <- copyResult{n: n, err: copyErr}
-	}()
-	ingressBytes, ingressErr := io.Copy(conn, tunneledUpstreamConn)
-	conn.Close()
-	tunneledUpstreamConn.Close()
-	egressResult := <-egressCh
-
-	lifecycle.addIngressBytes(ingressBytes)
-	lifecycle.addEgressBytes(egressResult.n)
-
-	outcome := classifyTunnelOutcome(
-		"socks_upstream_to_client",
-		"socks_client_to_upstream",
-		"socks_zero_traffic",
-		"socks_no_ingress_traffic",
-		"socks_no_egress_traffic",
-		ingressBytes,
-		ingressErr,
-		egressResult.n,
-		egressResult.err,
-	)
-	if !outcome.ok {
-		lifecycle.setProxyError(ErrUpstreamRequestFailed)
-		lifecycle.setUpstreamError(outcome.stage, outcome.err)
+	relay := pumpPreparedTunnelReader(conn, conn, session, tunnelPumpOptions{
+		requireBidirectionalTraffic: true,
+		ingressStage:                "socks_upstream_to_client",
+		egressStage:                 "socks_client_to_upstream",
+		zeroTrafficStage:            "socks_zero_traffic",
+		noIngressStage:              "socks_no_ingress_traffic",
+		noEgressStage:               "socks_no_egress_traffic",
+	})
+	lifecycle.addIngressBytes(relay.ingressBytes)
+	lifecycle.addEgressBytes(relay.egressBytes)
+	if relay.proxyErr != nil {
+		lifecycle.setProxyError(relay.proxyErr)
+		lifecycle.setUpstreamError(relay.upstreamStage, relay.upstreamErr)
 	}
-	lifecycle.setNetOK(outcome.ok)
-	if h.health != nil {
-		go h.health.RecordResult(route.NodeHash, outcome.ok)
-	}
+	lifecycle.setNetOK(relay.netOK)
+	session.recordResult(relay.netOK)
 }
 
 func (h *Socks5Handler) writeSOCKS5FailureAndClose(conn net.Conn, rep byte) {
